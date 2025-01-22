@@ -1,6 +1,6 @@
 """Core types for agent system using Pydantic models."""
 from typing import Protocol, runtime_checkable, Any, Set
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from langchain_core.messages import BaseMessage
 
 
@@ -49,13 +49,13 @@ class OrchestratorState(BaseModel):
     agent_ids: list[str] = Field(default_factory=list)
     next_agent: str | None = None
     
-    model_config = {
-        "arbitrary_types_allowed": True,
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_schema_extra={
             "examples": [{
                 "messages": [],
                 "agent_ids": ["research", "calculator"],
                 "next_agent": "research"
             }]
         }
-    }
+    )

@@ -7,7 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.pregel.types import StateSnapshot
 
-from agents.agents import Agent
+from agents.agents import GraphAgent
 from schema import ChatHistory, ChatMessage, ServiceMetadata
 from schema.models import OpenAIModelName
 
@@ -245,7 +245,11 @@ async def test_stream_no_tokens(test_client, mock_agent) -> None:
 def test_info(test_client, mock_settings) -> None:
     """Test that /info returns the correct service metadata."""
 
-    base_agent = Agent(description="A base agent.", graph=None)
+    base_agent = GraphAgent(
+        description="A base agent.",
+        graph=None,
+        capabilities={"base"}
+    )
     mock_settings.AUTH_SECRET = None
     mock_settings.DEFAULT_MODEL = OpenAIModelName.GPT_4O_MINI
     mock_settings.AVAILABLE_MODELS = {OpenAIModelName.GPT_4O_MINI, OpenAIModelName.GPT_4O}
