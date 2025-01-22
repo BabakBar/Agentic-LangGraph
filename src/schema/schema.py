@@ -17,6 +17,19 @@ class AgentInfo(BaseModel):
         description="Description of the agent.",
         examples=["A research assistant for generating research papers."],
     )
+    capabilities: list[str] = Field(
+        description="List of agent capabilities.",
+        default_factory=list,
+        examples=[["web_search", "summarization"]],
+    )
+
+
+class AgentMetadata(AgentInfo):
+    """Internal metadata about an agent instance."""
+    id: str = Field(
+        description="Internal agent identifier.",
+        examples=["research-assistant"],
+    )
 
 
 class ServiceMetadata(BaseModel):

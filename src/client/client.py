@@ -1,9 +1,14 @@
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 import httpx
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+from httpx import AsyncHTTPTransport, HTTPTransport
 
 from schema import (
     ChatHistory,
@@ -58,14 +63,28 @@ class AgentClient:
         return headers
 
     def retrieve_info(self) -> None:
+        url = f"{self.base_url}/info"
+        logger.debug(f"Attempting to connect to agent service at: {url}")
         try:
             response = httpx.get(
-                f"{self.base_url}/info",
+                url,
                 headers=self._headers,
                 timeout=self.timeout,
             )
             response.raise_for_status()
+            logger.debug("Successfully connected to agent service")
+        except httpx.ConnectError as e:
+            logger.error(f"Failed to connect to {url}: Connection refused or service not available")
+            raise AgentClientError(f"Error connecting to agent service: Connection refused")
         except httpx.HTTPError as e:
+            error_msg = f"HTTP Error connecting to {url}: {str(e)}"
+            if hasattr(e, 'response'):
+                error_msg += f"\nStatus code: {e.response.status_code}"
+                error_msg += f"\nResponse text: {e.response.text}"
+            logger.error(error_msg)
+            raise AgentClientError(f"Error getting service info: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error connecting to {url}: {str(e)}")
             raise AgentClientError(f"Error getting service info: {e}")
 
         self.info: ServiceMetadata = ServiceMetadata.model_validate(response.json())
