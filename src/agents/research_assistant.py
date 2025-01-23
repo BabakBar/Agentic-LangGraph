@@ -27,8 +27,7 @@ class AgentState(MessagesState, total=False):
 web_search = DuckDuckGoSearchResults(name="WebSearch")
 tools = [web_search, calculator]
 
-# Add weather tool if API key is set
-# Register for an API key at https://openweathermap.org/api/
+# Add tools
 if settings.OPENWEATHERMAP_API_KEY:
     wrapper = OpenWeatherMapAPIWrapper(
         openweathermap_api_key=settings.OPENWEATHERMAP_API_KEY.get_secret_value()
