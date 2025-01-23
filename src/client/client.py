@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 from httpx import AsyncHTTPTransport, HTTPTransport
 
-from schema import (
+from schema import (  # noqa: E402
     ChatHistory,
     ChatHistoryInput,
     ChatMessage,
