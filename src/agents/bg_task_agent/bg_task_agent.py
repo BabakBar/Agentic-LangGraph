@@ -9,7 +9,6 @@ from langgraph.graph import END, MessagesState, StateGraph
 from .task import Task
 from core import get_model, settings
 
-
 class AgentState(MessagesState, total=False):
     """`total=False` is PEP589 specs.
 

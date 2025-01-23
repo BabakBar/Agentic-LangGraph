@@ -14,7 +14,7 @@ class OrchestratorConfig(BaseModel):
     """Configuration for orchestrator graph."""
     checkpoint_dir: Path | None = None
     max_steps: int = 10
-    model_name: str = "gpt-4"
+    model_name: str = "gpt-4o"
     capability_matching: bool = Field(
         default=True,
         description="Whether to enable capability-based agent routing"
