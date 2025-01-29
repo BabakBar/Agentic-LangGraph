@@ -7,6 +7,7 @@ An AI agent service built with LangGraph, FastAPI and Streamlit.
 For detailed architecture documentation, see [System Architecture](docs/system_architecture.md)
 
 ### Core Components
+
 1. **Service Layer** (FastAPI)
    - REST API endpoints
    - Real-time streaming
@@ -32,6 +33,7 @@ For detailed architecture documentation, see [System Architecture](docs/system_a
 ## Implementation Details
 
 ### Agent Implementation
+
 For detailed agent documentation, see [Agent Implementation](docs/agent_implementation.md)
 
 - Centralized agent registry
@@ -40,6 +42,7 @@ For detailed agent documentation, see [Agent Implementation](docs/agent_implemen
 - Testing and debugging
 
 ### Service Implementation
+
 For detailed service documentation, see [Service Implementation](docs/service_implementation.md)
 
 - API endpoint design
@@ -49,30 +52,138 @@ For detailed service documentation, see [Service Implementation](docs/service_im
 
 ## Quickstart
 
-Run directly in python
+You can run the application either locally or using Docker. Both methods provide identical functionality and user experience.
 
-```sh
-# At least one LLM API key is required
-echo 'OPENAI_API_KEY=your_openai_api_key' >> .env
+### Prerequisites
 
-# uv is recommended but "pip install ." also works
-pip install uv
-uv sync --frozen
-# "uv sync" creates .venv automatically
-source .venv/bin/activate
-python src/run_service.py
+- Python 3.11 or 3.12
+- pip or uv package manager
+- At least one LLM API key (OpenAI, Anthropic, Google, etc.)
 
-# In another shell
-source .venv/bin/activate
-streamlit run src/streamlit_app.py
-```
+### Local Setup (Recommended for Development)
 
-Run with docker
+1. **Install Dependencies**:
 
-```sh
-echo 'OPENAI_API_KEY=your_openai_api_key' >> .env
-docker compose watch
-```
+   Windows (PowerShell):
+
+   ```powershell
+   # Install uv if not already installed
+   pip install uv
+
+   # Create and activate virtual environment
+   uv sync --frozen  # Creates .venv automatically
+   .\venv\Scripts\Activate.ps1
+   ```
+
+   macOS/Linux (bash):
+
+   ```bash
+   # Install uv if not already installed
+   pip install uv
+
+   # Create and activate virtual environment
+   uv sync --frozen  # Creates .venv automatically
+   source .venv/bin/activate
+   ```
+
+2. **Configure Environment**:
+
+   Windows (PowerShell):
+
+   ```powershell
+   # Copy environment file
+   Copy-Item .env.example .env
+   
+   # Edit .env file with your settings:
+   # MODE=dev
+   # DEFAULT_MODEL=gpt-4o-mini
+   # HOST=0.0.0.0
+   # PORT=8000
+   # Add your LLM API key(s)
+   ```
+
+   macOS/Linux (bash):
+
+   ```bash
+   # Copy environment file
+   cp .env.example .env
+   
+   # Edit .env file with your settings:
+   # MODE=dev
+   # DEFAULT_MODEL=gpt-4o-mini
+   # HOST=0.0.0.0
+   # PORT=8000
+   # Add your LLM API key(s)
+   ```
+
+3. **Run the Application**:
+
+   Windows (PowerShell) - Terminal 1:
+
+   ```powershell
+   # Start the backend service
+   python src/run_service.py
+   # Service will run on http://localhost:8000
+   ```
+
+   Windows (PowerShell) - Terminal 2:
+
+   ```powershell
+   # Start the Streamlit frontend
+   $env:AGENT_URL="http://localhost:8000"
+   streamlit run src/streamlit_app.py
+   # UI will be available at http://localhost:8501
+   ```
+
+   macOS/Linux (bash) - Terminal 1:
+
+   ```bash
+   # Start the backend service
+   python src/run_service.py
+   # Service will run on http://localhost:8000
+   ```
+
+   macOS/Linux (bash) - Terminal 2:
+
+   ```bash
+   # Start the Streamlit frontend
+   export AGENT_URL="http://localhost:8000"
+   streamlit run src/streamlit_app.py
+   # UI will be available at http://localhost:8501
+   ```
+
+### Docker Setup (Recommended for Production)
+
+1. **Configure Environment**:
+   - Copy `.env.example` to `.env`
+   - Configure the same environment variables as in local setup
+   - Docker will handle port mappings automatically
+
+2. **Run with Docker**:
+
+   ```sh
+   docker compose watch
+   ```
+
+   - Backend API: <http://localhost:8080/redoc>
+   - Streamlit UI: <http://localhost:8501>
+
+### Feature Parity
+
+Both local and Docker setups provide:
+
+- Identical API endpoints and functionality
+- Same Streamlit UI experience
+- Real-time streaming capabilities
+- LangSmith integration (if configured)
+- Hot reload for development
+
+The main differences are:
+
+- Local setup uses ports 8000/8501
+- Docker setup uses ports 8080/8501
+- Local setup provides easier debugging
+- Docker setup ensures consistent environment
 
 ## Architecture Diagram
 
@@ -88,48 +199,8 @@ docker compose watch
 6. **Asynchronous Design**: Efficient request handling
 7. **Feedback Mechanism**: LangSmith integration
 8. **Dynamic Metadata**: Service configuration discovery
-9.  **Docker Support**: Easy development and deployment
+9. **Docker Support**: Easy development and deployment
 10. **Testing**: Comprehensive test coverage
-
-## Setup and Usage
-
-1. Clone the repository:
-
-   ```sh
-   git clone https://github.com/JoshuaC215/agent-service-toolkit.git
-   cd agent-service-toolkit
-   ```
-
-2. Set up environment variables:
-   Create a `.env` file in the root directory. At least one LLM API key or configuration is required. See the [`.env.example` file](./.env.example) for a full list of available environment variables.
-
-### Docker Setup
-
-1. Build and launch the services in watch mode:
-
-   ```sh
-   docker compose watch
-   ```
-
-2. Access the Streamlit app at `http://localhost:8501`
-3. Access the API docs at `http://localhost:8080/redoc`
-
-### Local Development
-
-1. Create virtual environment:
-
-   ```sh
-   pip install uv
-   uv sync --frozen
-   source .venv/bin/activate
-   ```
-
-2. Run services:
-
-   ```sh
-   python src/run_service.py
-   streamlit run src/streamlit_app.py
-   ```
 
 ## Customization
 

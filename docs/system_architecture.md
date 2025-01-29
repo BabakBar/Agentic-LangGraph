@@ -89,7 +89,7 @@ The data flow when a user asks a question in the UI is as follows:
     *   For `/stream`, the service calls the agent's `astream_events` method and streams the response back to the client. The `message_generator` function parses the events and yields `ChatMessage` objects or string tokens.
 5.  **Agent Execution:** The selected agent (either a base agent or the orchestrator) processes the user's input.
     *   **Base Agent (e.g., `research-assistant`):** The agent's logic is defined in its corresponding file (`src/agents/research_assistant.py`). The agent may use tools, call other agents, or generate a response directly. The execution flow is: `Agent Input --> Model --> Tool Call Check --> (Tool Execution --> Model) * --> Final Response`
-    *   **Orchestrator:** The orchestrator's logic is defined in `src/agents/orchestrator/graph.py`. It routes the task to the appropriate base agent. The execution flow is: `Agent Input --> Router --> Agent Executor --> Base Agent --> Router --> Final Response`
+    *   **Orchestrator:** The orchestrator's logic is defined in `src/agents/orchestrator/graph.py`). It routes the task to the appropriate base agent. The execution flow is: `Agent Input --> Router --> Agent Executor --> Base Agent --> Router --> Final Response`
 6.  **Response Handling:**
     *   For `/invoke`, the service sends the final `ChatMessage` back to the client.
     *   For `/stream`, the service sends a stream of data back to the client, which includes `ChatMessage` objects and string tokens.
