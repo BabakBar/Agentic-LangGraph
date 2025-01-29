@@ -7,7 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.pregel.types import StateSnapshot
 
-from agents.agents import GraphAgent
+from agents.core.manager import GraphAgent
 from schema import ChatHistory, ChatMessage, ServiceMetadata
 from schema.models import OpenAIModelName
 

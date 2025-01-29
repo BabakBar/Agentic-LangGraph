@@ -2,7 +2,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from src.agents.agents import get_agent
-from src.agents.orchestrator.state import OrchestratorState
+from src.agents.common.types import OrchestratorState
 
 
 @pytest.mark.asyncio

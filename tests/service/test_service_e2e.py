@@ -5,8 +5,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents.agents import Agent
-from agents.utils import CustomData
+from agents.core.manager import Agent
+from agents.common.utils import CustomData
 from client import AgentClient
 from schema.schema import ChatMessage
 from service.utils import langchain_to_chat_message

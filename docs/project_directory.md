@@ -14,9 +14,21 @@ Agentic Orixa/
 ├── src/
 │   ├── agents/
 │   │   ├── __init__.py
-│   │   ├── agents.py           # Agent registry and configuration
-│   │   ├── research_assistant.py
-│   │   └── chatbot.py
+│   │   ├── core/
+│   │   │   ├── __init__.py
+│   │   │   ├── manager.py          # Agent registry and management
+│   │   │   ├── agent_registry.py   # Base agent registry implementation
+│   │   │   ├── registry_base.py    # Generic registry functionality
+│   │   │   └── orchestrator/       # Agent orchestration system
+│   │   │       ├── __init__.py
+│   │   │       ├── graph.py        # Graph construction for orchestrator
+│   │   │       └── router.py       # Routing logic between agents
+│   │   ├── agents/
+│   │   │   ├── base/
+│   │   │   │   └── chatbot.py      # Base chatbot implementation
+│   │   │   └── specialized/
+│   │   │       └── research_assistant.py  # Research assistant with tools
+│   │   └── tools/                  # LangChain-compatible tool implementations
 │   │
 │   ├── client/
 │   │   ├── __init__.py
@@ -29,7 +41,8 @@ Agentic Orixa/
 │   │
 │   ├── schema/
 │   │   ├── __init__.py
-│   │   └── messages.py        # Protocol schema definitions
+│   │   ├── schema.py         # Core schema definitions
+│   │   └── models.py         # Model-specific schemas
 │   │
 │   ├── service/
 │   │   ├── __init__.py        # Exports FastAPI app
@@ -79,3 +92,31 @@ pyproject.toml: Project metadata and dependencies
 langgraph.json: LangGraph Studio configuration
 .pre-commit-config.yaml: Code quality checks
 codecov.yml: Coverage reporting configuration
+
+5- Recent Architectural Changes
+
+Tool System Refactor:
+- Migrated from custom ToolProtocol to LangChain's @tool decorator
+- Tools now directly compatible with LangGraph's ToolNode
+- Example: calculator.py refactored to use @tool for better integration
+
+Import Structure:
+- Absolute imports used for top-level packages (e.g., 'schema', 'core')
+- Relative imports for internal modules within packages
+- Fixed circular dependencies between tools and agents
+- Example: manager.py now uses 'from schema.schema import AgentInfo'
+
+Agent Registry:
+- Enhanced AgentRegistry with get_base_agents() method
+- Returns runnable graphs for orchestrator compatibility
+- Fixed interaction between registry and orchestrator
+
+Docker Considerations:
+- src/ directory copied to /app/ in container
+- Import paths work in both local and Docker environments
+- No relative imports beyond top-level package
+
+Development Tips:
+- Use 'python src/run_service.py' for faster local testing
+- Docker build needed only for final verification
+- Watch mode enabled for automatic reloading

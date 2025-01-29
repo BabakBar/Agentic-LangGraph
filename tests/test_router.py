@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
-from src.agents.types import (
+from src.agents.common.types import (
     AgentLike,
     OrchestratorState,
     RouterDecision,
@@ -16,7 +16,7 @@ from src.agents.types import (
     RoutingMetadata
 )
 from src.agents.registry import AgentRegistry
-from src.agents.orchestrator.router import (
+from src.agents.core.orchestrator.router import (
     RoutingManager,
     ROUTING_PROMPT,
     route_node,
@@ -205,7 +205,7 @@ async def test_routing_manager_fallback_chain(mock_registry, test_state):
 @pytest.mark.asyncio
 async def test_route_node_integration(test_state, test_config, mock_llm):
     """Test full routing node functionality."""
-    with patch("src.agents.orchestrator.router.get_model", return_value=mock_llm):
+    with patch("src.agents.core.orchestrator.router.get_model", return_value=mock_llm):
         # Test successful LLM routing
         result = await route_node(test_state, test_config)
         assert result.routing.current_agent == "research-assistant"

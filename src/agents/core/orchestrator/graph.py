@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from ..types import AgentLike, OrchestratorState
+from ...common.types import AgentLike, OrchestratorState
 from .router import route_node, should_continue
 
 
@@ -99,7 +99,7 @@ def build_orchestrator(
     
     # Add nodes for each base agent
     for agent_id, agent in base_agents.items():
-        graph.add_node(agent_id, agent.graph)
+        graph.add_node(agent_id, agent)
     
     # Set migration as entry point
     graph.set_entry_point("migrate")

@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
-from service import app
+from src.service import app
 
 
 @pytest.fixture
@@ -19,14 +19,14 @@ def mock_agent():
     agent_mock = AsyncMock()
     agent_mock.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="Test response")]})
     agent_mock.get_state = Mock()  # Default empty mock for get_state
-    with patch("service.service.get_agent", Mock(return_value=agent_mock)):
+    with patch("src.service.service.get_agent", Mock(return_value=agent_mock)):
         yield agent_mock
 
 
 @pytest.fixture
 def mock_settings(mock_env):
     """Fixture to ensure settings are clean for each test."""
-    with patch("service.service.settings") as mock_settings:
+    with patch("src.service.service.settings") as mock_settings:
         yield mock_settings
 
 

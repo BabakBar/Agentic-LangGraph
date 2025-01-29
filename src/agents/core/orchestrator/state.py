@@ -1,10 +1,10 @@
 """State management for the orchestrator agent."""
 from typing import Dict, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage
 
-from ..types import OrchestratorState
+from ..types import OrchestratorState, ToolState
 
 
 class Router(BaseModel):
@@ -12,8 +12,8 @@ class Router(BaseModel):
     next: str
     context: Dict[str, Any] = {}
 
-    class Config:
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "examples": [
                 {
                     "next": "research-assistant",
@@ -25,6 +25,7 @@ class Router(BaseModel):
                 }
             ]
         }
+    }
 
 
 def create_initial_state(messages: list[BaseMessage]) -> OrchestratorState:
@@ -32,5 +33,6 @@ def create_initial_state(messages: list[BaseMessage]) -> OrchestratorState:
     return OrchestratorState(
         messages=messages,
         agent_ids=[],
-        next_agent=None
+        next_agent=None,
+        tool_state=ToolState()  # Initialize with empty tool state
     )
