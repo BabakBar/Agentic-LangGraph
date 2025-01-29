@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.service
     ports:
-      - "8080:80"
+      - "8080:8000"
     env_file:
       - .env
     develop:
@@ -28,7 +28,7 @@ services:
     depends_on:
       - agent_service
     environment:
-      - AGENT_URL=http://agent_service:80
+      - AGENT_URL=http://agent_service:8000
     develop:
       watch:
         - path: src/client/
@@ -41,13 +41,13 @@ services:
           action: sync+restart
           target: /app/streamlit_app.py
 
-  test:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.test
-    volumes:
-      - ./src:/app/src
-      - ./tests:/app/tests
-    environment:
-      - PYTHONPATH=/app
-      - OPENAI_API_KEY=sk-fake-openai-key
+  # test:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile.test
+  #   volumes:
+  #     - ./src:/app/src
+  #     - ./tests:/app/tests
+  #   environment:
+  #     - PYTHONPATH=/app
+  #     - OPENAI_API_KEY=sk-fake-openai-key
