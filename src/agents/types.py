@@ -20,6 +20,7 @@ class RoutingError(AgentError):
     """Raised for routing-related issues."""
     pass
 
+@runtime_checkable
 class AgentLike(Protocol):
     """Protocol defining required agent interface."""
     @property

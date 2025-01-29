@@ -17,7 +17,7 @@ class OrchestratorConfig(BaseModel):
     max_steps: int = Field(default=10, ge=1)
     
     # Routing settings
-    model_name: str = "gpt-3.5-turbo"
+    model_name: str = "gpt4o"
     llm_routing: bool = Field(
         default=True,
         description="Enable LLM-based routing decisions"
