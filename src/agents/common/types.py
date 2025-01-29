@@ -67,6 +67,27 @@ class ValidatedRouterOutput(RouterDecision):
             raise ValueError(f"Confidence too low: {self.confidence}")
         return self
 
+class ToolState(BaseModel):
+    """State management for tool execution."""
+    tool_states: Dict[str, Any] = Field(default_factory=dict)
+    last_update: Optional[datetime] = None
+    
+    def update(self, tool_id: str, state: Any) -> "ToolState":
+        """Update state for a specific tool."""
+        self.tool_states[tool_id] = state
+        self.last_update = datetime.now()
+        return self
+
+    def get(self, tool_id: str, default: Any = None) -> Any:
+        """Get state for a specific tool."""
+        return self.tool_states.get(tool_id, default)
+
+    def clear(self, tool_id: str) -> None:
+        """Clear state for a specific tool."""
+        if tool_id in self.tool_states:
+            del self.tool_states[tool_id]
+            self.last_update = datetime.now()
+
 class OrchestratorState(BaseModel):
     """Serializable state for orchestrator with immutable core."""
     # Immutable conversation history
@@ -74,6 +95,9 @@ class OrchestratorState(BaseModel):
     
     # Mutable routing state
     routing: RoutingMetadata = Field(default_factory=RoutingMetadata)
+
+    # Tool state management
+    tool_state: ToolState = Field(default_factory=ToolState)
     
     # Backward compatibility
     agent_ids: List[str] = Field(default_factory=list)
@@ -111,4 +135,18 @@ class OrchestratorState(BaseModel):
                 agent=agent
             )
         )
+        return self
+
+    def update_tool_state(self, tool_id: str, state: Any) -> "OrchestratorState":
+        """Update state for a specific tool."""
+        self.tool_state.update(tool_id, state)
+        return self
+
+    def get_tool_state(self, tool_id: str, default: Any = None) -> Any:
+        """Get state for a specific tool."""
+        return self.tool_state.get(tool_id, default)
+
+    def clear_tool_state(self, tool_id: str) -> "OrchestratorState":
+        """Clear state for a specific tool."""
+        self.tool_state.clear(tool_id)
         return self
