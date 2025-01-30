@@ -7,6 +7,13 @@ services:
       - "8080:8000"
     env_file:
       - .env
+    environment:
+      - PORT=8000
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+      - LANGCHAIN_VERBOSE=true
+      - LANGCHAIN_DEBUG=true
+      - LANGGRAPH_DEBUG=true
     develop:
       watch:
         - path: src/agents/
@@ -18,6 +25,8 @@ services:
         - path: src/service/
           action: sync+restart
           target: /app/service/
+    logging:
+      driver: json-file
 
   streamlit_app:
     build:
@@ -29,6 +38,9 @@ services:
       - agent_service
     environment:
       - AGENT_URL=http://agent_service:8000
+      - PYTHONUNBUFFERED=1
+      - STREAMLIT_LOG_LEVEL=debug
+      - LOG_LEVEL=DEBUG
     develop:
       watch:
         - path: src/client/
@@ -40,6 +52,8 @@ services:
         - path: src/streamlit_app.py
           action: sync+restart
           target: /app/streamlit_app.py
+    logging:
+      driver: json-file
 
   # test:
   #   build:

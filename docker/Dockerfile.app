@@ -9,7 +9,7 @@ COPY pyproject.toml .
 COPY uv.lock .
 RUN pip install --no-cache-dir uv
 # Only install the client dependencies
-RUN uv sync --frozen --only-group client
+RUN uv sync --only-group client
 
 COPY src/client/ ./client/
 COPY src/schema/ ./schema/

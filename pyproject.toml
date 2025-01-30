@@ -1,9 +1,9 @@
 [project]
-name = "agent-service-toolkit"
-version = "0.1.0"
-description = "Full toolkit for running an AI agent service built with LangGraph, FastAPI and Streamlit"
+name = "agentixa"
+version = "0.1.1"
+description = "Orixa Agentic AI built with LangGraph, FastAPI and Streamlit"
 readme = "README.md"
-authors = [{ name = "Joshua Carroll", email = "carroll.joshk@gmail.com" }]
+authors = [{ name = "Babak Barghi", email = "babak.barghi@gmail.com" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
@@ -67,7 +67,8 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-extend-select = ["I", "U"]
+select = ["E", "F", "I", "UP"]  # Enable isort (I) and pyupgrade (UP) rules
+ignore = []
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
