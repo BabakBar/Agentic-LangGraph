@@ -16,13 +16,7 @@ from client.monitoring_dashboard import draw_metrics_dashboard
 
 APP_TITLE = "Agentic Orixa"
 WELCOME_MESSAGE = """
-Welcome! I'm an AI orchestrator that can help you with various tasks. I'll automatically:
-- Route your questions to the most appropriate agent
-- Handle web searches and calculations
-- Process background tasks
-- Manage streaming responses
-
-Just ask me anything, and I'll take care of the rest!
+Just ask me anything!
 """
 
 async def main() -> None:
