@@ -218,6 +218,7 @@ class AgentClient:
         if not self.agent:
             raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
         request = StreamInput(message=message, stream_tokens=stream_tokens)
+        logger.debug(f"Starting stream request for agent {self.agent}")
         if thread_id:
             request.thread_id = thread_id
         if model:
@@ -281,13 +282,16 @@ class AgentClient:
                     timeout=self.timeout,
                 ) as response:
                     response.raise_for_status()
+                    logger.debug("Stream connection established")
                     async for line in response.aiter_lines():
                         if line.strip():
+                            logger.debug(f"Received line: {line[:100]}...")
                             parsed = self._parse_stream_line(line)
                             if parsed is None:
                                 break
                             yield parsed
             except httpx.HTTPError as e:
+                logger.error(f"Stream error: {e}")
                 raise AgentClientError(f"Error: {e}")
 
     async def acreate_feedback(

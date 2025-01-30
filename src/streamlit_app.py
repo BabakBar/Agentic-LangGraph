@@ -12,7 +12,7 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 from client import AgentClient, AgentClientError
 from schema import ChatHistory, ChatMessage
 from schema.task_data import TaskData, TaskDataStatus
-from core.monitoring_dashboard import draw_metrics_dashboard
+from client.monitoring_dashboard import draw_metrics_dashboard
 
 APP_TITLE = "Agentic Orixa"
 WELCOME_MESSAGE = """
@@ -60,7 +60,7 @@ async def main() -> None:
             agent_url = f"http://{host}:{port}"
         try:
             with st.spinner("Connecting to agent service..."):
-                st.session_state.agent_client = AgentClient(base_url=agent_url)
+                st.session_state.agent_client = AgentClient(base_url=agent_url, agent="orchestrator")
         except AgentClientError as e:
             st.error(f"Error connecting to agent service: {e}")
             st.markdown("The service might be booting up. Try again in a few seconds.")
@@ -126,8 +126,7 @@ async def main() -> None:
                     stream = agent_client.astream(
                         message=user_input,
                         model=model,
-                        thread_id=st.session_state.thread_id,
-                        agent="orchestrator"  # Always use orchestrator
+                        thread_id=st.session_state.thread_id
                     )
                     await draw_messages(stream, is_new=True)
                 else:
@@ -135,7 +134,6 @@ async def main() -> None:
                         message=user_input,
                         model=model,
                         thread_id=st.session_state.thread_id,
-                        agent="orchestrator"  # Always use orchestrator
                     )
                     messages.append(response)
                     st.chat_message("ai").write(response.content)
@@ -167,115 +165,124 @@ async def draw_messages(
     routing_status = None
 
     # Process messages
-    while msg := await anext(messages_agen, None):
-        # Handle streaming tokens
-        if isinstance(msg, str):
-            if not streaming_placeholder:
-                if last_message_type != "ai":
-                    last_message_type = "ai"
-                    st.session_state.last_message = st.chat_message("ai")
-                with st.session_state.last_message:
-                    streaming_placeholder = st.empty()
-                    routing_status = st.status("🤖 Orchestrator Processing", state="running")
+    try:
+        async for msg in messages_agen:            
+            if not msg:
+                continue
 
-            streaming_content += msg
-            streaming_placeholder.write(streaming_content)
-            continue
-
-        if not isinstance(msg, ChatMessage):
-            st.error(f"Unexpected message type: {type(msg)}")
-            st.write(msg)
-            st.stop()
-
-        # Handle different message types
-        match msg.type:
-            case "human":
-                last_message_type = "human"
-                st.chat_message("human").write(msg.content)
-
-            case "ai":
-                if is_new:
-                    st.session_state.messages.append(msg)
-
-                if last_message_type != "ai":
-                    last_message_type = "ai"
-                    st.session_state.last_message = st.chat_message("ai")
-
-                with st.session_state.last_message:
-                    # Update routing status if present
-                    if routing_status and msg.metadata.get("routing_decision"):
-                        decision = msg.metadata["routing_decision"]
-                        routing_status.update(
-                            label=f"🤖 Routed to: {decision['next_agent']}",
-                            state="complete",
-                            expanded=False
-                        )
-                        routing_status.markdown(f"""
-                        **Confidence:** {decision['confidence']:.2f}
-                        **Reason:** {decision['reasoning']}
-                        """)
-
-                    # Write message content
-                    if msg.content:
-                        if streaming_placeholder:
-                            streaming_placeholder.write(msg.content)
-                            streaming_content = ""
-                            streaming_placeholder = None
-                        else:
-                            st.write(msg.content)
-
-                    # Handle tool calls
-                    if msg.tool_calls:
-                        call_results = {}
-                        for tool_call in msg.tool_calls:
-                            status = st.status(
-                                f"""🔧 Tool: {tool_call["name"]}""",
-                                state="running" if is_new else "complete",
-                            )
-                            call_results[tool_call["id"]] = status
-                            status.write("Input:")
-                            status.write(tool_call["args"])
-
-                        for _ in range(len(call_results)):
-                            tool_result: ChatMessage = await anext(messages_agen)
-                            if tool_result.type != "tool":
-                                st.error(f"Unexpected message type: {tool_result.type}")
-                                st.write(tool_result)
-                                st.stop()
-
-                            if is_new:
-                                st.session_state.messages.append(tool_result)
-                            status = call_results[tool_result.tool_call_id]
-                            status.write("Output:")
-                            status.write(tool_result.content)
-                            status.update(state="complete")
-
-            case "custom":
-                try:
-                    task_data: TaskData = TaskData.model_validate(msg.custom_data)
-                except ValidationError:
-                    st.error("Invalid custom data received")
-                    st.write(msg.custom_data)
-                    st.stop()
-
-                if is_new:
-                    st.session_state.messages.append(msg)
-
-                if last_message_type != "task":
-                    last_message_type = "task"
-                    st.session_state.last_message = st.chat_message(
-                        name="task",
-                        avatar="🔄"
-                    )
+            # Handle streaming tokens
+            if isinstance(msg, str):
+                if not streaming_placeholder:
+                    if last_message_type != "ai":
+                        last_message_type = "ai"
+                        st.session_state.last_message = st.chat_message("ai")
                     with st.session_state.last_message:
-                        status = TaskDataStatus()
+                        streaming_placeholder = st.empty()
+                        routing_status = st.status("🤖 Orchestrator Processing", state="running")
 
-                status.add_and_draw_task_data(task_data)
+                streaming_content += msg
+                streaming_placeholder.write(streaming_content)
+                continue
+            elif isinstance(msg, ChatMessage):
+                # Handle different message types
+                match msg.type:
+                    case "human":
+                        last_message_type = "human"
+                        st.chat_message("human").write(msg.content)
 
-            case _:
-                st.error(f"Unknown message type: {msg.type}")
+                    case "ai":
+                        if is_new:
+                            st.session_state.messages.append(msg)
+
+                        if last_message_type != "ai":
+                            last_message_type = "ai"
+                            st.session_state.last_message = st.chat_message("ai")
+
+                        with st.session_state.last_message:
+                            # Update routing status if present
+                            if routing_status and msg.metadata.get("routing_decision"):
+                                decision = msg.metadata["routing_decision"]
+                                routing_status.update(
+                                    label=f"🤖 Routed to: {decision['next_agent']}",
+                                    state="complete",
+                                    expanded=False
+                                )
+                                routing_status.markdown(f"""
+                                **Confidence:** {decision['confidence']:.2f}
+                                **Reason:** {decision['reasoning']}
+                                """)
+
+                            # Write message content
+                            if msg.content:
+                                if streaming_placeholder:
+                                    streaming_placeholder.write(msg.content)
+                                    streaming_content = ""
+                                    streaming_placeholder = None
+                                else:
+                                    st.write(msg.content)
+
+                            # Handle tool calls
+                            if msg.tool_calls:
+                                call_results = {}
+                                for tool_call in msg.tool_calls:
+                                    status = st.status(
+                                        f"""🔧 Tool: {tool_call["name"]}""",
+                                        state="running" if is_new else "complete",
+                                    )
+                                    call_results[tool_call["id"]] = status
+                                    status.write("Input:")
+                                    status.write(tool_call["args"])
+
+                                for _ in range(len(call_results)):
+                                    tool_result: ChatMessage = await anext(messages_agen)
+                                    if tool_result.type != "tool":
+                                        st.error(f"Unexpected message type: {tool_result.type}")
+                                        st.write(tool_result)
+                                        st.stop()
+
+                                    if is_new:
+                                        st.session_state.messages.append(tool_result)
+                                    status = call_results[tool_result.tool_call_id]
+                                    status.write("Output:")
+                                    status.write(tool_result.content)
+                                    status.update(state="complete")
+
+                    case "custom":
+                        try:
+                            task_data: TaskData = TaskData.model_validate(msg.custom_data)
+                        except ValidationError:
+                            st.error("Invalid custom data received")
+                            st.write(msg.custom_data)
+                            st.stop()
+
+                        if is_new:
+                            st.session_state.messages.append(msg)
+
+                        if last_message_type != "task":
+                            last_message_type = "task"
+                            st.session_state.last_message = st.chat_message(
+                                name="task",
+                                avatar="🔄"
+                            )
+                            with st.session_state.last_message:
+                                status = TaskDataStatus()
+
+                        status.add_and_draw_task_data(task_data)
+
+                    case _:
+                        st.error(f"Unknown message type: {msg.type}")
+                        st.write(msg)
+                        st.stop()
+            else:
+                st.error(f"Unexpected message type: {type(msg)}")
                 st.write(msg)
                 st.stop()
+
+    except Exception as e:
+        st.error(f"Error processing messages: {e}")
+        if streaming_placeholder:
+            streaming_placeholder.write("Error: Failed to get response")
+        raise  # Re-raise to see the full error in logs
 
 async def handle_feedback() -> None:
     """Handle user feedback collection."""
