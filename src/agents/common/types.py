@@ -67,6 +67,61 @@ class ValidatedRouterOutput(RouterDecision):
             raise ValueError(f"Confidence too low: {self.confidence}")
         return self
 
+class StreamBuffer(BaseModel):
+    """Manages streaming content buffer."""
+    content: List[str] = Field(default_factory=list)
+    is_complete: bool = False
+    error: Optional[str] = None
+    agent_id: Optional[str] = None
+    
+    def add_token(self, token: str) -> None:
+        """Add a token to the buffer."""
+        self.content.append(token)
+    
+    def get_content(self) -> str:
+        """Get complete buffered content."""
+        return "".join(self.content)
+    
+    def mark_complete(self) -> None:
+        """Mark the buffer as complete."""
+        self.is_complete = True
+    
+    def clear(self) -> None:
+        """Clear the buffer."""
+        self.content = []
+        self.is_complete = False
+        self.error = None
+
+class StreamingState(BaseModel):
+    """Manages streaming state across agents."""
+    is_streaming: bool = False
+    current_buffer: Optional[StreamBuffer] = None
+    buffers: Dict[str, StreamBuffer] = Field(default_factory=dict)
+    
+    def start_stream(self, agent_id: str) -> None:
+        """Start streaming for an agent."""
+        self.is_streaming = True
+        self.current_buffer = StreamBuffer(agent_id=agent_id)
+        self.buffers[agent_id] = self.current_buffer
+    
+    def end_stream(self) -> None:
+        """End current stream."""
+        if self.current_buffer:
+            self.current_buffer.mark_complete()
+        self.is_streaming = False
+        self.current_buffer = None
+    
+    def add_token(self, token: str) -> None:
+        """Add token to current buffer."""
+        if self.current_buffer:
+            self.current_buffer.add_token(token)
+    
+    def set_error(self, error: str) -> None:
+        """Set error on current buffer."""
+        if self.current_buffer:
+            self.current_buffer.error = error
+            self.end_stream()
+
 class ToolState(BaseModel):
     """State management for tool execution."""
     tool_states: Dict[str, Any] = Field(default_factory=dict)
@@ -95,6 +150,9 @@ class OrchestratorState(BaseModel):
     
     # Mutable routing state
     routing: RoutingMetadata = Field(default_factory=RoutingMetadata)
+
+    # Streaming state management
+    streaming: StreamingState = Field(default_factory=StreamingState)
 
     # Tool state management
     tool_state: ToolState = Field(default_factory=ToolState)
@@ -149,4 +207,24 @@ class OrchestratorState(BaseModel):
     def clear_tool_state(self, tool_id: str) -> "OrchestratorState":
         """Clear state for a specific tool."""
         self.tool_state.clear(tool_id)
+        return self
+
+    def start_stream(self, agent_id: str) -> "OrchestratorState":
+        """Start streaming for an agent."""
+        self.streaming.start_stream(agent_id)
+        return self
+
+    def end_stream(self) -> "OrchestratorState":
+        """End current stream."""
+        self.streaming.end_stream()
+        return self
+
+    def add_token(self, token: str) -> "OrchestratorState":
+        """Add token to current stream."""
+        self.streaming.add_token(token)
+        return self
+
+    def set_stream_error(self, error: str) -> "OrchestratorState":
+        """Set error on current stream."""
+        self.streaming.set_error(error)
         return self

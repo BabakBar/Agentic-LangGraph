@@ -1,7 +1,7 @@
 """Orchestrator agent that routes tasks between specialized agents."""
 from pathlib import Path
 
-from .graph import build_orchestrator, OrchestratorConfig
+from .graph import build_orchestrator, NodeConfig
 from ...common.types import OrchestratorState
 from ..agent_registry import AgentRegistry
 
@@ -16,7 +16,7 @@ def create_orchestrator(registry: AgentRegistry, checkpoint_dir: Path | None = N
     Returns:
         Compiled orchestrator graph
     """
-    config = OrchestratorConfig(checkpoint_dir=checkpoint_dir)
+    config = NodeConfig(checkpoint_dir=checkpoint_dir)
     base_agents = registry.get_base_agents()
     return build_orchestrator(config, base_agents)
 
@@ -24,5 +24,5 @@ def create_orchestrator(registry: AgentRegistry, checkpoint_dir: Path | None = N
 __all__ = [
     "create_orchestrator",
     "OrchestratorState",
-    "OrchestratorConfig",
+    "NodeConfig",
 ]

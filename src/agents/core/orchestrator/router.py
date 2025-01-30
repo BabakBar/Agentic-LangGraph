@@ -1,195 +1,195 @@
 """Router implementation with LLM-based routing and validation."""
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Literal
 from datetime import datetime
 import time
 import functools
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, Field, model_validator
 from langchain_core.runnables import RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.language_models import BaseLLM
 
 from core.llm import get_model
 from core.settings import settings
 from ..agent_registry import AgentRegistry
-from ...common.types import (
-    OrchestratorState,
-    RouterDecision,
-    ValidatedRouterOutput,
-    RoutingError,
-    RoutingMetadata
-)
+from ...common.types import OrchestratorState
 
+# Define available agents as literals for type safety
+AgentType = Literal[
+    "research-assistant",
+    "chatbot",
+    "bg-task-agent",
+    "FINISH"
+]
 
-# Prompt template for LLM routing
-ROUTING_PROMPT = ChatPromptTemplate.from_messages([
-    SystemMessagePromptTemplate.from_template("""
-    Analyze the conversation history and select the most appropriate agent.
+class RouterDecision(BaseModel):
+    """Structured output for routing decisions."""
+    next_agent: AgentType
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasoning: str
+    capabilities_matched: List[str] = Field(default_factory=list)
+    fallback_agents: List[AgentType] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "RouterDecision":
+        """Validate decision fields."""
+        if not self.reasoning:
+            raise ValueError("Reasoning must be provided")
+        if self.confidence < 0.5:
+            raise ValueError(f"Confidence too low: {self.confidence}")
+        return self
+
+class OrchestratorRouter:
+    """Pure functional router implementation."""
     
-    Available Agents:
-    {agents}
-    
-    Respond with JSON containing:
-    - next: Agent ID to handle the request
-    - reasoning: Brief explanation of your choice
-    - confidence: Score between 0-1 indicating certainty
-    - alternatives: List of other possible agents
-    """),
-    HumanMessage(content="Latest input: {input}")
-])
-
-
-def track_routing_metrics(fn):
-    """Decorator to track routing performance metrics."""
-    @functools.wraps(fn)
-    async def wrapper(state: OrchestratorState, config: RunnableConfig):
-        start = time.time()
-        try:
-            result = await fn(state, config)
-            duration = time.time() - start
-            # TODO: Add metric logging
-            # log_metric("routing_time", duration)
-            return result
-        except Exception as e:
-            # TODO: Add error logging
-            # log_error("routing_error", str(e))
-            raise
-    return wrapper
-
-
-class RoutingManager:
-    """Manages routing decisions and fallback logic."""
-    
-    def __init__(self, registry: AgentRegistry, config: Dict[str, Any]):
-        self.registry = registry
-        self.config = config
-        self.llm = get_model(config.get("model_name", "gpt-3.5-turbo"))
-    
-    async def get_llm_decision(self, state: OrchestratorState) -> RouterDecision:
-        """Get routing decision from LLM."""
-        agents = "\n".join([
-            f"- {id}: {meta.description}"
-            for id, meta in self.registry.metadata.items()
-        ])
+    def __init__(self, llm: BaseLLM, agents: Dict[str, Any]):
+        """Initialize router with LLM and agent registry."""
+        self.llm = llm.with_structured_output(RouterDecision)
+        self.agents = agents
+        self.system_prompt = SystemMessage(content="""
+        You are a routing agent that directs requests to specialized agents.
+        Available agents and their capabilities:
         
-        prompt = ROUTING_PROMPT.format_messages(
-            agents=agents,
-            input=state.messages[-1].content
-        )
+        - research-assistant: Web search, data analysis, fact verification
+        - chatbot: General conversation, simple queries, clarifications
+        - bg-task-agent: Long-running tasks, background processing, data generation
         
-        response = await self.llm.ainvoke(prompt)
-        return RouterDecision.model_validate_json(response.content)
+        Select the most appropriate agent based on:
+        1. Required capabilities
+        2. Task complexity
+        3. Expected execution time
+        4. Streaming requirements
+        
+        Provide your decision with:
+        - next_agent: The chosen agent
+        - confidence: Score between 0-1
+        - reasoning: Clear explanation
+        - capabilities_matched: List of matched capabilities
+        - fallback_agents: Alternative agents if primary fails
+        """)
     
-    def get_keyword_decision(self, user_input: str) -> RouterDecision:
-        """Fallback to keyword-based routing."""
-        task_keywords = {"process", "background", "task", "generate", "analyze"}
-        if any(kw in user_input.lower() for kw in task_keywords):
-            return RouterDecision(
-                next="bg-task-agent",
-                confidence=0.8,
-                reasoning="Keyword match: task processing",
-                alternatives=["research-assistant"]
-            )
-        return RouterDecision(
-            next="research-assistant",
-            confidence=0.6,
-            reasoning="Default research agent",
-            alternatives=["bg-task-agent"]
-        )
-    
-    def validate_decision(
-        self,
-        decision: RouterDecision,
-        min_confidence: float = 0.5
-    ) -> Tuple[ValidatedRouterOutput, Optional[str]]:
-        """Validate routing decision against registry and business rules."""
-        try:
-            if decision.confidence < min_confidence:
-                return None, f"Low confidence score: {decision.confidence}"
-                
-            if not self.registry.has_agent(decision.next):
-                return None, f"Invalid agent: {decision.next}"
-                
-            validated = ValidatedRouterOutput(
-                next=decision.next,
-                confidence=decision.confidence,
-                reasoning=decision.reasoning,
-                alternatives=decision.alternatives
-            )
-            return validated, None
-            
-        except Exception as e:
-            return None, str(e)
-    
-    async def execute_fallback_chain(
+    async def route(
         self,
         state: OrchestratorState,
-        error: Optional[str] = None
-    ) -> OrchestratorState:
-        """Execute fallback chain when primary routing fails."""
-        if error:
-            state.add_error(error, state.messages[-1].content)
-        
-        # Try keyword-based routing
-        decision = self.get_keyword_decision(state.messages[-1].content)
-        validated, error = self.validate_decision(decision)
-        
-        if error:
-            # Final fallback to research assistant
-            state.routing.fallback_used = True
-            return state.update_routing(RouterDecision(
-                next="research-assistant",
-                confidence=0.5,
-                reasoning="Final fallback",
-                alternatives=[]
-            ))
-        
-        state.routing.fallback_used = True
-        return state.update_routing(validated)
-
-
-@track_routing_metrics
-async def route_node(state: OrchestratorState, config: RunnableConfig) -> OrchestratorState:
-    """Route to next agent using LLM with fallback chain."""
-    try:
-        registry = config.get("registry")
-        if not registry:
-            raise RoutingError("Registry not found in config")
-        
-        router = RoutingManager(registry, config)
-        
-        # Try LLM-based routing first
+        config: Dict[str, Any]
+    ) -> RouterDecision:
+        """Get routing decision with fallback handling."""
         try:
-            decision = await router.get_llm_decision(state)
-            validated, error = router.validate_decision(
-                decision,
-                min_confidence=config.get("min_confidence", 0.5)
-            )
+            # Handle streaming continuation
+            if state.streaming.is_streaming:
+                return RouterDecision(
+                    next_agent=state.routing.current_agent,
+                    confidence=1.0,
+                    reasoning="Continue streaming with current agent",
+                    capabilities_matched=["streaming"],
+                    fallback_agents=[]
+                )
             
-            if error:
-                return await router.execute_fallback_chain(state, error)
+            # Get base decision
+            decision = await self._get_base_decision(state)
             
-            return state.update_routing(validated)
+            # Validate decision
+            if not self._validate_decision(decision, config):
+                decision = await self._get_fallback_decision(state, decision)
+            
+            return decision
             
         except Exception as e:
-            # Any LLM errors trigger fallback
-            return await router.execute_fallback_chain(state, str(e))
+            # Handle errors with safe fallback
+            return RouterDecision(
+                next_agent="chatbot",
+                confidence=0.5,
+                reasoning=f"Error in routing: {str(e)}",
+                capabilities_matched=[],
+                fallback_agents=["research-assistant"]
+            )
+    
+    async def _get_base_decision(
+        self,
+        state: OrchestratorState
+    ) -> RouterDecision:
+        """Get initial routing decision."""
+        # Prepare agent capabilities
+        agents_info = "\n".join([
+            f"- {id}: {meta.description} (capabilities: {', '.join(meta.capabilities)})"
+            for id, meta in self.agents.items()
+        ])
         
-    except Exception as e:
-        # Critical errors default to research assistant
-        state.add_error(str(e), state.messages[-1].content)
-        return state.update_routing(RouterDecision(
-            next="research-assistant",
-            confidence=0.5,
-            reasoning="Critical error fallback",
-            alternatives=[]
-        ))
+        messages = [
+            self.system_prompt,
+            SystemMessage(content=f"Available agents:\n{agents_info}"),
+            HumanMessage(content=state.messages[-1].content)
+        ]
+        
+        return await self.llm.ainvoke(messages)
+    
+    def _validate_decision(
+        self,
+        decision: RouterDecision,
+        config: Dict[str, Any]
+    ) -> bool:
+        """Validate routing decision."""
+        min_confidence = config.get("min_confidence", 0.7)
+        
+        # Basic validation
+        if decision.confidence < min_confidence:
+            return False
+            
+        # Agent availability
+        if decision.next_agent not in self.agents and decision.next_agent != "FINISH":
+            return False
+            
+        # Capability matching
+        if config.get("require_capabilities", True):
+            agent = self.agents.get(decision.next_agent)
+            if agent and not decision.capabilities_matched:
+                return False
+            
+        return True
+    
+    async def _get_fallback_decision(
+        self,
+        state: OrchestratorState,
+        failed_decision: RouterDecision
+    ) -> RouterDecision:
+        """Get fallback decision when primary fails."""
+        # Use simpler prompt for fallback
+        messages = [
+            SystemMessage(content="Select fallback agent for failed request"),
+            HumanMessage(content=f"""
+            Original request: {state.messages[-1].content}
+            Failed agent: {failed_decision.next_agent}
+            Reason: {failed_decision.reasoning}
+            Available fallbacks: {failed_decision.fallback_agents}
+            """)
+        ]
+        
+        decision = await self.llm.ainvoke(messages)
+        decision.confidence *= 0.8  # Reduce confidence for fallback
+        return decision
 
+def create_router(
+    llm: Optional[BaseLLM] = None,
+    agents: Optional[Dict[str, Any]] = None,
+    config: Optional[Dict[str, Any]] = None
+) -> OrchestratorRouter:
+    """Create router instance with defaults."""
+    llm = llm or get_model(settings.DEFAULT_MODEL)
+    agents = agents or {}
+    config = config or {}
+    
+    return OrchestratorRouter(llm, agents)
 
 def should_continue(state: OrchestratorState) -> str:
     """Determine if orchestration should continue."""
+    # End if no current agent
     if not state.routing.current_agent:
         return "end"
-    
-    # Continue if we have a valid agent
-    return "continue"
+        
+    # Continue if streaming
+    if state.streaming.is_streaming:
+        return "continue"
+        
+    # Continue if valid agent
+    return "continue" if state.routing.current_agent != "FINISH" else "end"

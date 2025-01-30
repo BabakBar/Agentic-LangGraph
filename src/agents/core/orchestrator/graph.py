@@ -1,152 +1,237 @@
 """Pure graph construction for orchestrator."""
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
-from pydantic import BaseModel, Field, model_validator
+from typing import Dict, Optional, Any, List
+from abc import ABC, abstractmethod
 
+from pydantic import BaseModel, Field, model_validator
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Command
 
 from ...common.types import AgentLike, OrchestratorState
-from .router import route_node, should_continue
+from ..metrics import metrics, NodeMetrics
+from .router import create_router, should_continue
 
-
-class OrchestratorConfig(BaseModel):
-    """Configuration for orchestrator graph."""
-    # Core settings
+class NodeConfig(BaseModel):
+    """Configuration for graph nodes."""
+    max_retries: int = Field(default=3, ge=1)
+    timeout_seconds: int = Field(default=30, ge=1)
+    enable_metrics: bool = Field(default=True)
     checkpoint_dir: Optional[Path] = None
-    max_steps: int = Field(default=10, ge=1)
-    
-    # Routing settings
-    model_name: str = "gpt4o"
-    llm_routing: bool = Field(
-        default=True,
-        description="Enable LLM-based routing decisions"
-    )
-    llm_fallback_threshold: float = Field(
-        default=0.7,
-        description="Confidence threshold for falling back to keyword routing"
-    )
-    capability_matching: bool = Field(
-        default=True,
-        description="Enable capability-based agent routing"
-    )
-    
-    # Monitoring settings
-    enable_metrics: bool = Field(
-        default=True,
-        description="Enable routing metrics collection"
-    )
-    
-    # State versioning
-    min_state_version: str = "2.0"
-    
-    @model_validator(mode="after")
-    def validate_config(self) -> "OrchestratorConfig":
-        """Validate configuration settings."""
-        if self.llm_fallback_threshold < 0.5:
-            raise ValueError("LLM fallback threshold must be >= 0.5")
-        return self
-    
-    class Config:
-        validate_assignment = True
 
+class GraphNode(ABC):
+    """Base class for graph nodes."""
+    def __init__(self, config: NodeConfig):
+        self.config = config
+        self.node_metrics: Optional[NodeMetrics] = None
+        
+    async def execute(self, state: OrchestratorState) -> Command:
+        """Execute node with metrics and error handling."""
+        # Start metrics collection
+        if self.config.enable_metrics:
+            self.node_metrics = metrics.start_node(self.__class__.__name__)
+            
+        try:
+            result = await self._execute(state)
+            
+            # Record success metrics
+            if self.node_metrics:
+                self.node_metrics.complete(success=True)
+                
+            return result
+            
+        except Exception as e:
+            # Record error metrics
+            if self.node_metrics:
+                self.node_metrics.complete(success=False)
+                
+            return await self._handle_error(state, e)
+            
+    @abstractmethod
+    async def _execute(self, state: OrchestratorState) -> Command:
+        """Implement actual node logic."""
+        pass
+        
+    async def _handle_error(self, state: OrchestratorState, error: Exception) -> Command:
+        """Handle node execution errors."""
+        state.add_error(str(error), state.messages[-1].content)
+        if self.node_metrics and self.node_metrics.error_count > self.config.max_retries:
+            return Command(goto="error_recovery")
+        return Command(goto="router")
 
-def migrate_state(state: OrchestratorState, min_version: str) -> OrchestratorState:
-    """Migrate state to current version if needed."""
-    if not hasattr(state, "schema_version") or state.schema_version < min_version:
-        # Create new state with current version
-        return OrchestratorState(
-            messages=state.messages,
-            agent_ids=state.agent_ids,
-            next_agent=state.next_agent,
-            schema_version=min_version
+class RouterNode(GraphNode):
+    """Node for routing decisions."""
+    def __init__(self, router: Any, config: NodeConfig):
+        super().__init__(config)
+        self.router = router
+        
+    async def _execute(self, state: OrchestratorState) -> Command:
+        """Execute routing logic."""
+        start_time = datetime.now()
+        decision = await self.router.route(state, {
+            "min_confidence": 0.7,
+            "require_capabilities": True
+        })
+        
+        # Record routing metrics
+        if self.config.enable_metrics:
+            routing_time = (datetime.now() - start_time).total_seconds()
+            metrics.add_router_decision(
+                agent=decision.next_agent,
+                confidence=decision.confidence,
+                routing_time=routing_time,
+                is_fallback=state.routing.fallback_used
+            )
+            
+        return Command(
+            goto="executor" if decision.next_agent != "FINISH" else END,
+            update={"routing": state.update_routing(decision)}
         )
-    return state
 
+class AgentExecutorNode(GraphNode):
+    """Node for executing agent actions."""
+    def __init__(self, agents: Dict[str, AgentLike], config: NodeConfig):
+        super().__init__(config)
+        self.agents = agents
+        
+    async def _execute(self, state: OrchestratorState) -> Command:
+        """Execute selected agent."""
+        agent = self.agents[state.routing.current_agent]
+        result = await agent.execute(state)
+        
+        # Handle streaming
+        if state.streaming.is_streaming:
+            return Command(goto="streaming")
+            
+        return Command(goto="router")
+
+class StreamingNode(GraphNode):
+    """Node for handling streaming responses."""
+    async def _execute(self, state: OrchestratorState) -> Command:
+        """Handle streaming state."""
+        if not state.streaming.is_streaming:
+            return Command(goto="router")
+            
+        buffer = state.streaming.current_buffer
+        if buffer and buffer.is_complete:
+            # Record streaming metrics
+            if self.config.enable_metrics:
+                metrics.add_stream_metrics(
+                    stream_time=self.node_metrics.execution_time if self.node_metrics else 0,
+                    token_count=len(buffer.tokens),
+                    success=not bool(buffer.error)
+                )
+                
+            state.end_stream()
+            return Command(goto="router")
+            
+        return Command(goto="executor")
+
+class ErrorRecoveryNode(GraphNode):
+    """Node for handling errors."""
+    async def _execute(self, state: OrchestratorState) -> Command:
+        """Handle error recovery."""
+        if state.routing.error_count > self.config.max_retries:
+            # Switch to fallback agent
+            return Command(
+                goto="router",
+                update={
+                    "routing": state.update_routing({
+                        "next_agent": "chatbot",
+                        "confidence": 0.5,
+                        "reasoning": "Error recovery fallback"
+                    })
+                }
+            )
+        return Command(goto="router")
+
+class OrchestratorGraph:
+    """Builder for orchestrator graph."""
+    def __init__(self, config: NodeConfig):
+        self.config = config
+        self.graph = StateGraph(OrchestratorState)
+        
+    def add_router(self, router: Any) -> None:
+        """Add routing node."""
+        node = RouterNode(router, self.config)
+        self.graph.add_node("router", node.execute)
+        
+    def add_executor(self, agents: Dict[str, AgentLike]) -> None:
+        """Add agent executor node."""
+        node = AgentExecutorNode(agents, self.config)
+        self.graph.add_node("executor", node.execute)
+        
+    def add_streaming(self) -> None:
+        """Add streaming handler node."""
+        node = StreamingNode(self.config)
+        self.graph.add_node("streaming", node.execute)
+        
+    def add_error_recovery(self) -> None:
+        """Add error recovery node."""
+        node = ErrorRecoveryNode(self.config)
+        self.graph.add_node("error_recovery", node.execute)
+        
+    def add_edges(self) -> None:
+        """Add graph edges."""
+        # Router edges
+        self.graph.add_conditional_edges(
+            "router",
+            should_continue,
+            {
+                "continue": "executor",
+                "end": END
+            }
+        )
+        
+        # Executor edges
+        self.graph.add_conditional_edges(
+            "executor",
+            lambda s: "streaming" if s.streaming.is_streaming else "router",
+            {
+                "streaming": "streaming",
+                "router": "router"
+            }
+        )
+        
+        # Streaming edges
+        self.graph.add_conditional_edges(
+            "streaming",
+            lambda s: "router" if not s.streaming.is_streaming else "executor",
+            {
+                "router": "router",
+                "executor": "executor"
+            }
+        )
+        
+        # Error recovery edges
+        self.graph.add_edge("error_recovery", "router")
+        
+    def build(self) -> StateGraph:
+        """Build final graph."""
+        return self.graph.compile()
 
 def build_orchestrator(
-    config: OrchestratorConfig,
-    base_agents: Dict[str, AgentLike],
+    config: Optional[NodeConfig] = None,
+    base_agents: Optional[Dict[str, AgentLike]] = None
 ) -> StateGraph:
-    """Create orchestrator graph with pure construction.
+    """Create orchestrator graph."""
+    config = config or NodeConfig()
+    base_agents = base_agents or {}
     
-    Args:
-        config: Configuration for the orchestrator
-        base_agents: Dictionary of base agents to orchestrate
+    # Create graph builder
+    builder = OrchestratorGraph(config)
     
-    Returns:
-        Compiled state graph
-    """
-    # Initialize graph with our state type
-    graph = StateGraph(OrchestratorState)
+    # Create router
+    router = create_router(agents=base_agents)
     
-    # Add state migration node
-    def migrate_node(state: OrchestratorState) -> OrchestratorState:
-        return migrate_state(state, config.min_state_version)
+    # Add nodes
+    builder.add_router(router)
+    builder.add_executor(base_agents)
+    builder.add_streaming()
+    builder.add_error_recovery()
     
-    graph.add_node("migrate", migrate_node)
+    # Add edges
+    builder.add_edges()
     
-    # Add the routing node with config
-    def configured_route_node(state: OrchestratorState):
-        return route_node(state, {
-            "registry": base_agents,
-            "model_name": config.model_name,
-            "min_confidence": config.llm_fallback_threshold,
-            "enable_metrics": config.enable_metrics
-        })
-    
-    graph.add_node("router", configured_route_node)
-    
-    # Add nodes for each base agent
-    for agent_id, agent in base_agents.items():
-        graph.add_node(agent_id, agent)
-    
-    # Set migration as entry point
-    graph.set_entry_point("migrate")
-    
-    # Add edge from migration to router
-    graph.add_edge("migrate", "router")
-    
-    # Add conditional edges from router to agents
-    agent_map = {name: name for name in base_agents.keys()}
-    graph.add_conditional_edges(
-        "router",
-        should_continue,
-        {
-            "continue": "agent_executor",
-            "end": END
-        }
-    )
-    
-    # Add agent execution node that routes to appropriate agent
-    def agent_executor(state: OrchestratorState) -> str:
-        """Route to next agent based on state."""
-        current_agent = state.routing.current_agent
-        if not current_agent:
-            raise ValueError("No agent specified in routing state")
-        if current_agent not in base_agents:
-            raise ValueError(f"Invalid agent: {current_agent}")
-        return current_agent
-    
-    # Add the agent_executor node
-    graph.add_node("agent_executor", agent_executor)
-    
-    # Add conditional edges for agent execution
-    graph.add_conditional_edges(
-        "agent_executor",
-        agent_executor,
-        agent_map
-    )
-    
-    # Add edges from agents back to router
-    for agent_id in base_agents:
-        graph.add_edge(agent_id, "router")
-    
-    # Configure checkpointing
-    checkpointer = None
-    if config.checkpoint_dir:
-        config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        checkpointer = MemorySaver()
-    
-    # Compile the graph
-    return graph.compile(checkpointer=checkpointer)
+    return builder.build()
