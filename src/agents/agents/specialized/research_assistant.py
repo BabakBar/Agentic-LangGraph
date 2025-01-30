@@ -52,7 +52,7 @@ instructions = f"""
 def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
     model = model.bind_tools(tools)
     preprocessor = RunnableLambda(
-        lambda state: [SystemMessage(content=instructions)] + state["messages"],
+        lambda state: [SystemMessage(content=instructions)] + state.get("messages", state.get("input", {}).get("messages", [])),
         name="StateModifier",
     )
     return preprocessor | model
@@ -65,15 +65,22 @@ async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
 
     if state["remaining_steps"] < 2 and response.tool_calls:
         return {
-            "messages": [
-                AIMessage(
-                    id=response.id,
-                    content="Sorry, need more steps to process this request.",
-                )
-            ]
+            "messages": [AIMessage(
+                id=response.id,
+                content="Sorry, need more steps to process this request.",
+            )],
+            "routing": state.get("routing", {}),
+            "streaming": state.get("streaming", {}),
+            "tool_state": state.get("tool_state", {}),
+            "schema_version": state.get("schema_version", "2.0")
         }
-    # We return a list, because this will get added to the existing list
-    return {"messages": [response]}
+    return {
+        "messages": [response],
+        "routing": state.get("routing", {}),
+        "streaming": state.get("streaming", {}),
+        "tool_state": state.get("tool_state", {}),
+        "schema_version": state.get("schema_version", "2.0")
+    }
 
 
 # Define the graph

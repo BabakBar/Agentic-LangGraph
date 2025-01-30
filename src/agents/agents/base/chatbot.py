@@ -16,7 +16,7 @@ class AgentState(MessagesState, total=False):
 
 def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
     preprocessor = RunnableLambda(
-        lambda state: state["messages"],
+        lambda state: state.get("messages", state.get("input", {}).get("messages", [])),
         name="StateModifier",
     )
     return preprocessor | model
@@ -28,7 +28,13 @@ async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
     response = await model_runnable.ainvoke(state, config)
 
     # We return a list, because this will get added to the existing list
-    return {"messages": [response]}
+    return {
+        "messages": [response],
+        "routing": state.get("routing", {}),
+        "streaming": state.get("streaming", {}),
+        "tool_state": state.get("tool_state", {}),
+        "schema_version": state.get("schema_version", "2.0")
+    }
 
 
 # Define the graph

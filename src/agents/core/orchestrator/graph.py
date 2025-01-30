@@ -1,6 +1,7 @@
 """Pure graph construction for orchestrator."""
 from datetime import datetime
 from pathlib import Path
+import logging
 from typing import Dict, Optional, Any, List
 from abc import ABC, abstractmethod
 
@@ -12,6 +13,8 @@ from langgraph.types import Command
 from ...common.types import AgentLike, OrchestratorState
 from ..metrics import metrics, NodeMetrics
 from .router import create_router, should_continue
+
+logger = logging.getLogger(__name__)
 
 class NodeConfig(BaseModel):
     """Configuration for graph nodes."""
@@ -68,6 +71,7 @@ class RouterNode(GraphNode):
         
     async def _execute(self, state: OrchestratorState) -> Command:
         """Execute routing logic."""
+        logger.debug("RouterNode executing with state: %s", state)
         start_time = datetime.now()
         decision = await self.router.route(state, {
             "min_confidence": 0.7,
@@ -83,6 +87,7 @@ class RouterNode(GraphNode):
                 routing_time=routing_time,
                 is_fallback=state.routing.fallback_used
             )
+        logger.debug("Routing decision: %s", decision)
             
         return Command(
             goto="executor" if decision.next_agent != "FINISH" else END,
@@ -97,12 +102,19 @@ class AgentExecutorNode(GraphNode):
         
     async def _execute(self, state: OrchestratorState) -> Command:
         """Execute selected agent."""
+        logger.debug("AgentExecutorNode executing with agent: %s", state.routing.current_agent)
         agent = self.agents[state.routing.current_agent]
-        result = await agent.execute(state)
+        # Convert state to dict while preserving messages
+        agent_state = {
+            "messages": list(state.messages),  # Convert frozen list to mutable
+            "config": state.model_dump().get("config", {})
+        }
+        result = await agent.ainvoke(agent_state)
+        logger.debug("Agent execution result: %s", result)
         
         # Handle streaming
         if state.streaming.is_streaming:
-            return Command(goto="streaming")
+            return Command(goto="stream_handler")
             
         return Command(goto="router")
 
@@ -110,6 +122,7 @@ class StreamingNode(GraphNode):
     """Node for handling streaming responses."""
     async def _execute(self, state: OrchestratorState) -> Command:
         """Handle streaming state."""
+        logger.debug("StreamingNode state: %s", state.streaming)
         if not state.streaming.is_streaming:
             return Command(goto="router")
             
@@ -132,6 +145,7 @@ class ErrorRecoveryNode(GraphNode):
     """Node for handling errors."""
     async def _execute(self, state: OrchestratorState) -> Command:
         """Handle error recovery."""
+        logger.debug("ErrorRecoveryNode executing with error count: %d", state.routing.error_count)
         if state.routing.error_count > self.config.max_retries:
             # Switch to fallback agent
             return Command(
@@ -165,7 +179,7 @@ class OrchestratorGraph:
     def add_streaming(self) -> None:
         """Add streaming handler node."""
         node = StreamingNode(self.config)
-        self.graph.add_node("streaming", node.execute)
+        self.graph.add_node("stream_handler", node.execute)
         
     def add_error_recovery(self) -> None:
         """Add error recovery node."""
@@ -180,25 +194,36 @@ class OrchestratorGraph:
             should_continue,
             {
                 "continue": "executor",
-                "end": END
+                "end": END,
+                "error_recovery": "error_recovery"
             }
         )
         
         # Executor edges
         self.graph.add_conditional_edges(
             "executor",
-            lambda s: "streaming" if s.streaming.is_streaming else "router",
+            lambda s: (
+                "stream_handler" if s.streaming.is_streaming
+                else "error_recovery" if s.routing.error_count > self.config.max_retries
+                else "router"
+            ),
             {
-                "streaming": "streaming",
+                "stream_handler": "stream_handler",
+                "error_recovery": "error_recovery",
                 "router": "router"
             }
         )
         
         # Streaming edges
         self.graph.add_conditional_edges(
-            "streaming",
-            lambda s: "router" if not s.streaming.is_streaming else "executor",
+            "stream_handler",
+            lambda s: (
+                "error_recovery" if s.routing.error_count > self.config.max_retries
+                else "router" if not s.streaming.is_streaming
+                else "executor"
+            ),
             {
+                "error_recovery": "error_recovery",
                 "router": "router",
                 "executor": "executor"
             }

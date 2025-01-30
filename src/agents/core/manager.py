@@ -33,7 +33,19 @@ class GraphAgent:
         return self._graph
 
     async def ainvoke(self, state: dict[str, Any]) -> dict[str, Any]:
-        return await self._graph.ainvoke(state)
+        if "routing" in state:
+            # This is an orchestrator state, pass it through
+            return await self._graph.ainvoke(state)
+        else:
+            # This is a base agent state, convert to expected format
+            agent_state = {
+                "messages": state.get("messages", []),
+                "configurable": state.get("config", {}).get("configurable", {}),
+                "routing": {"current_agent": None},
+                "streaming": {"is_streaming": False},
+                "tool_state": {}
+            }
+            return await self._graph.ainvoke(agent_state)
 
 # Initialize registries
 _registry = AgentRegistry()

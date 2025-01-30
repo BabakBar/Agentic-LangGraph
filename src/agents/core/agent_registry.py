@@ -46,10 +46,10 @@ class AgentRegistry(RegistryBase[AgentLike, AgentMetadata]):
             return agent.graph
         return agent
 
-    def get_base_agents(self) -> Dict[str, Any]:
-        """Get all base agents as runnable graphs."""
+    def get_base_agents(self) -> Dict[str, AgentLike]:
+        """Get all base agents as AgentLike instances."""
         base_agents = self.get_by_category("base")
         return {
-            agent_id: self.get_runnable(agent_id)
+            agent_id: self.get_agent(agent_id)
             for agent_id in base_agents
         }

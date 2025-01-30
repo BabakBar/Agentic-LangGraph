@@ -45,7 +45,10 @@ class OrchestratorRouter:
     
     def __init__(self, llm: BaseLLM, agents: Dict[str, Any]):
         """Initialize router with LLM and agent registry."""
-        self.llm = llm.with_structured_output(RouterDecision)
+        # Don't use structured output for streaming compatibility
+        self.llm = llm
+        # Use a separate non-streaming LLM for routing decisions
+        self.decision_llm = llm.with_structured_output(RouterDecision)
         self.agents = agents
         self.system_prompt = SystemMessage(content="""
         You are a routing agent that directs requests to specialized agents.
@@ -122,7 +125,7 @@ class OrchestratorRouter:
             HumanMessage(content=state.messages[-1].content)
         ]
         
-        return await self.llm.ainvoke(messages)
+        return await self.decision_llm.ainvoke(messages)
     
     def _validate_decision(
         self,
@@ -165,7 +168,7 @@ class OrchestratorRouter:
             """)
         ]
         
-        decision = await self.llm.ainvoke(messages)
+        decision = await self.decision_llm.ainvoke(messages)
         decision.confidence *= 0.8  # Reduce confidence for fallback
         return decision
 
@@ -186,6 +189,10 @@ def should_continue(state: OrchestratorState) -> str:
     # End if no current agent
     if not state.routing.current_agent:
         return "end"
+        
+    # Check for errors
+    if state.routing.error_count > 3:  # Using MAX_ERRORS from state.py
+        return "error_recovery"
         
     # Continue if streaming
     if state.streaming.is_streaming:
