@@ -25,8 +25,8 @@ def test_init(mock_env):
     )
     assert client.base_url == "http://test"
     assert client.timeout == 30.0
-    client.update_agent("test-agent", verify=False)
-    assert client.agent == "test-agent"
+    client.update_agent("orchestrator", verify=False)
+    assert client.agent == "orchestrator"
 
 
 def test_headers(mock_env):
@@ -296,12 +296,13 @@ def test_get_history(agent_client):
 
 def test_info(agent_client):
     assert agent_client.info is None
-    assert agent_client.agent == "test-agent"
+    assert agent_client.agent == "orchestrator"
 
     # Mock info response
     test_info = ServiceMetadata(
-        default_agent="custom-agent",
-        agents=[AgentInfo(key="custom-agent", description="Custom agent")],
+        default_agent="orchestrator",
+        agents=[AgentInfo(key="orchestrator", description="Orchestrator agent"),
+                AgentInfo(key="chatbot", description="Chat agent")],
         default_model=OpenAIModelName.GPT_4O,
         models=[OpenAIModelName.GPT_4O, OpenAIModelName.GPT_4O_MINI],
     )
@@ -314,12 +315,12 @@ def test_info(agent_client):
         agent_client.retrieve_info()
 
     assert agent_client.info == test_info
-    assert agent_client.agent == "custom-agent"
+    assert agent_client.agent == "orchestrator"
 
     # Test invalid update_agent
     with pytest.raises(AgentClientError) as exc:
         agent_client.update_agent("unknown-agent")
-    assert "Agent unknown-agent not found in available agents: custom-agent" in str(exc.value)
+    assert "Agent unknown-agent not found in available agents: orchestrator, chatbot" in str(exc.value)
 
     # Test a fresh client with info
     with patch("httpx.get", return_value=test_response):
