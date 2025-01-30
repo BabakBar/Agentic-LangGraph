@@ -1,7 +1,8 @@
+"""Streamlit app for interacting with the orchestrator agent."""
 import asyncio
 import os
-import urllib.parse
 from collections.abc import AsyncGenerator
+from typing import Optional
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -11,24 +12,24 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 from client import AgentClient, AgentClientError
 from schema import ChatHistory, ChatMessage
 from schema.task_data import TaskData, TaskDataStatus
-
-# A Streamlit app for interacting with the langgraph agent via a simple chat interface.
-# The app has three main functions which are all run async:
-
-# - main() - sets up the streamlit app and high level structure
-# - draw_messages() - draws a set of chat messages - either replaying existing messages
-#   or streaming new ones.
-# - handle_feedback() - Draws a feedback widget and records feedback from the user.
-
-# The app heavily uses AgentClient to interact with the agent's FastAPI endpoints.
-
+from core.monitoring_dashboard import draw_metrics_dashboard
 
 APP_TITLE = "Agentic Orixa"
+WELCOME_MESSAGE = """
+Welcome! I'm an AI orchestrator that can help you with various tasks. I'll automatically:
+- Route your questions to the most appropriate agent
+- Handle web searches and calculations
+- Process background tasks
+- Manage streaming responses
 
+Just ask me anything, and I'll take care of the rest!
+"""
 
 async def main() -> None:
+    """Main app entry point."""
     st.set_page_config(
         page_title=APP_TITLE,
+        layout="wide",
         menu_items={},
     )
 
@@ -49,6 +50,7 @@ async def main() -> None:
         await asyncio.sleep(0.1)
         st.rerun()
 
+    # Initialize agent client
     if "agent_client" not in st.session_state:
         load_dotenv()
         agent_url = os.getenv("AGENT_URL")
@@ -65,6 +67,7 @@ async def main() -> None:
             st.stop()
     agent_client: AgentClient = st.session_state.agent_client
 
+    # Initialize thread state
     if "thread_id" not in st.session_state:
         thread_id = st.query_params.get("thread_id")
         if not thread_id:
@@ -79,140 +82,140 @@ async def main() -> None:
         st.session_state.messages = messages
         st.session_state.thread_id = thread_id
 
-    # Config options
+    # Sidebar
     with st.sidebar:
-        st.header(f"{APP_TITLE}")
+        st.header(APP_TITLE)
         ""
-        "Full toolkit for running an AI agent service built with LangGraph, FastAPI and Streamlit"
-        with st.popover(":material/settings: Settings", use_container_width=True):
+        "AI orchestrator powered by LangGraph"
+        with st.expander("i️ About", expanded=False):
+            st.markdown("""
+            This AI orchestrator:
+            - Routes tasks to specialized agents
+            - Handles streaming responses
+            - Manages tool execution
+            - Provides error recovery
+            """)
+        with st.popover("⚙️ Settings", use_container_width=True):
             model_idx = agent_client.info.models.index(agent_client.info.default_model)
             model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
-            agent_list = [a.key for a in agent_client.info.agents]
-            agent_idx = agent_list.index(agent_client.info.default_agent)
-            agent_client.agent = st.selectbox(
-                "Agent to use",
-                options=agent_list,
-                index=agent_idx,
-            )
             use_streaming = st.toggle("Stream results", value=True)
 
-    # Draw existing messages
-    messages: list[ChatMessage] = st.session_state.messages
+    # Tab interface
+    tab1, tab2 = st.tabs(["💬 Chat", "📊 Monitoring"])
 
-    if len(messages) == 0:
-        WELCOME = "Hello! I'm an AI-powered research assistant with web search and a calculator. Ask me anything!"
-        with st.chat_message("ai"):
-            st.write(WELCOME)
+    with tab1:  # Chat Interface
+        messages: list[ChatMessage] = st.session_state.messages
 
-    # draw_messages() expects an async iterator over messages
-    async def amessage_iter() -> AsyncGenerator[ChatMessage, None]:
-        for m in messages:
-            yield m
+        if len(messages) == 0:
+            with st.chat_message("ai"):
+                st.markdown(WELCOME_MESSAGE)
 
-    await draw_messages(amessage_iter())
+        # Draw messages
+        async def amessage_iter() -> AsyncGenerator[ChatMessage, None]:
+            for m in messages:
+                yield m
 
-    # Generate new message if the user provided new input
-    if user_input := st.chat_input():
-        messages.append(ChatMessage(type="human", content=user_input))
-        st.chat_message("human").write(user_input)
-        try:
-            if use_streaming:
-                stream = agent_client.astream(
-                    message=user_input,
-                    model=model,
-                    thread_id=st.session_state.thread_id,
-                )
-                await draw_messages(stream, is_new=True)
-            else:
-                response = await agent_client.ainvoke(
-                    message=user_input,
-                    model=model,
-                    thread_id=st.session_state.thread_id,
-                )
-                messages.append(response)
-                st.chat_message("ai").write(response.content)
-            st.rerun()  # Clear stale containers
-        except AgentClientError as e:
-            st.error(f"Error generating response: {e}")
-            st.stop()
+        await draw_messages(amessage_iter())
 
-    # If messages have been generated, show feedback widget
-    if len(messages) > 0 and st.session_state.last_message:
-        with st.session_state.last_message:
-            await handle_feedback()
+        # Handle new user input
+        if user_input := st.chat_input():
+            messages.append(ChatMessage(type="human", content=user_input))
+            st.chat_message("human").write(user_input)
+            try:
+                if use_streaming:
+                    stream = agent_client.astream(
+                        message=user_input,
+                        model=model,
+                        thread_id=st.session_state.thread_id,
+                        agent="orchestrator"  # Always use orchestrator
+                    )
+                    await draw_messages(stream, is_new=True)
+                else:
+                    response = await agent_client.ainvoke(
+                        message=user_input,
+                        model=model,
+                        thread_id=st.session_state.thread_id,
+                        agent="orchestrator"  # Always use orchestrator
+                    )
+                    messages.append(response)
+                    st.chat_message("ai").write(response.content)
+                st.rerun()
+            except AgentClientError as e:
+                st.error(f"Error: {str(e)}")
+                if "routing" in str(e).lower():
+                    st.info("The orchestrator will try to recover and route to a fallback agent.")
+                st.stop()
 
+        # Show feedback widget
+        if len(messages) > 0 and st.session_state.last_message:
+            with st.session_state.last_message:
+                await handle_feedback()
+
+    with tab2:  # Monitoring Dashboard
+        draw_metrics_dashboard()
 
 async def draw_messages(
     messages_agen: AsyncGenerator[ChatMessage | str, None],
     is_new: bool = False,
 ) -> None:
-    """
-    Draws a set of chat messages - either replaying existing messages
-    or streaming new ones.
-
-    This function has additional logic to handle streaming tokens and tool calls.
-    - Use a placeholder container to render streaming tokens as they arrive.
-    - Use a status container to render tool calls. Track the tool inputs and outputs
-      and update the status container accordingly.
-
-    The function also needs to track the last message container in session state
-    since later messages can draw to the same container. This is also used for
-    drawing the feedback widget in the latest chat message.
-
-    Args:
-        messages_aiter: An async iterator over messages to draw.
-        is_new: Whether the messages are new or not.
-    """
-
-    # Keep track of the last message container
+    """Draw chat messages with streaming and tool call support."""
+    # Track message state
     last_message_type = None
     st.session_state.last_message = None
-
-    # Placeholder for intermediate streaming tokens
     streaming_content = ""
     streaming_placeholder = None
+    routing_status = None
 
-    # Iterate over the messages and draw them
+    # Process messages
     while msg := await anext(messages_agen, None):
-        # str message represents an intermediate token being streamed
+        # Handle streaming tokens
         if isinstance(msg, str):
-            # If placeholder is empty, this is the first token of a new message
-            # being streamed. We need to do setup.
             if not streaming_placeholder:
                 if last_message_type != "ai":
                     last_message_type = "ai"
                     st.session_state.last_message = st.chat_message("ai")
                 with st.session_state.last_message:
                     streaming_placeholder = st.empty()
+                    routing_status = st.status("🤖 Orchestrator Processing", state="running")
 
             streaming_content += msg
             streaming_placeholder.write(streaming_content)
             continue
+
         if not isinstance(msg, ChatMessage):
             st.error(f"Unexpected message type: {type(msg)}")
             st.write(msg)
             st.stop()
+
+        # Handle different message types
         match msg.type:
-            # A message from the user, the easiest case
             case "human":
                 last_message_type = "human"
                 st.chat_message("human").write(msg.content)
 
-            # A message from the agent is the most complex case, since we need to
-            # handle streaming tokens and tool calls.
             case "ai":
-                # If we're rendering new messages, store the message in session state
                 if is_new:
                     st.session_state.messages.append(msg)
 
-                # If the last message type was not AI, create a new chat message
                 if last_message_type != "ai":
                     last_message_type = "ai"
                     st.session_state.last_message = st.chat_message("ai")
 
                 with st.session_state.last_message:
-                    # If the message has content, write it out.
-                    # Reset the streaming variables to prepare for the next message.
+                    # Update routing status if present
+                    if routing_status and msg.metadata.get("routing_decision"):
+                        decision = msg.metadata["routing_decision"]
+                        routing_status.update(
+                            label=f"🤖 Routed to: {decision['next_agent']}",
+                            state="complete",
+                            expanded=False
+                        )
+                        routing_status.markdown(f"""
+                        **Confidence:** {decision['confidence']:.2f}
+                        **Reason:** {decision['reasoning']}
+                        """)
+
+                    # Write message content
                     if msg.content:
                         if streaming_placeholder:
                             streaming_placeholder.write(msg.content)
@@ -221,30 +224,25 @@ async def draw_messages(
                         else:
                             st.write(msg.content)
 
+                    # Handle tool calls
                     if msg.tool_calls:
-                        # Create a status container for each tool call and store the
-                        # status container by ID to ensure results are mapped to the
-                        # correct status container.
                         call_results = {}
                         for tool_call in msg.tool_calls:
                             status = st.status(
-                                f"""Tool Call: {tool_call["name"]}""",
+                                f"""🔧 Tool: {tool_call["name"]}""",
                                 state="running" if is_new else "complete",
                             )
                             call_results[tool_call["id"]] = status
                             status.write("Input:")
                             status.write(tool_call["args"])
 
-                        # Expect one ToolMessage for each tool call.
                         for _ in range(len(call_results)):
                             tool_result: ChatMessage = await anext(messages_agen)
                             if tool_result.type != "tool":
-                                st.error(f"Unexpected ChatMessage type: {tool_result.type}")
+                                st.error(f"Unexpected message type: {tool_result.type}")
                                 st.write(tool_result)
                                 st.stop()
 
-                            # Record the message if it's new, and update the correct
-                            # status container with the result
                             if is_new:
                                 st.session_state.messages.append(tool_result)
                             status = call_results[tool_result.tool_call_id]
@@ -253,14 +251,10 @@ async def draw_messages(
                             status.update(state="complete")
 
             case "custom":
-                # CustomData example used by the bg-task-agent
-                # See:
-                # - src/agents/utils.py CustomData
-                # - src/agents/bg_task_agent/task.py
                 try:
                     task_data: TaskData = TaskData.model_validate(msg.custom_data)
                 except ValidationError:
-                    st.error("Unexpected CustomData message received from agent")
+                    st.error("Invalid custom data received")
                     st.write(msg.custom_data)
                     st.stop()
 
@@ -270,35 +264,29 @@ async def draw_messages(
                 if last_message_type != "task":
                     last_message_type = "task"
                     st.session_state.last_message = st.chat_message(
-                        name="task", avatar=":material/manufacturing:"
+                        name="task",
+                        avatar="🔄"
                     )
                     with st.session_state.last_message:
                         status = TaskDataStatus()
 
                 status.add_and_draw_task_data(task_data)
 
-            # In case of an unexpected message type, log an error and stop
             case _:
-                st.error(f"Unexpected ChatMessage type: {msg.type}")
+                st.error(f"Unknown message type: {msg.type}")
                 st.write(msg)
                 st.stop()
 
-
 async def handle_feedback() -> None:
-    """Draws a feedback widget and records feedback from the user."""
-
-    # Keep track of last feedback sent to avoid sending duplicates
+    """Handle user feedback collection."""
     if "last_feedback" not in st.session_state:
         st.session_state.last_feedback = (None, None)
 
     latest_run_id = st.session_state.messages[-1].run_id
     feedback = st.feedback("stars", key=latest_run_id)
 
-    # If the feedback value or run ID has changed, send a new feedback record
     if feedback is not None and (latest_run_id, feedback) != st.session_state.last_feedback:
-        # Normalize the feedback value (an index) to a score between 0 and 1
         normalized_score = (feedback + 1) / 5.0
-
         agent_client: AgentClient = st.session_state.agent_client
         try:
             await agent_client.acreate_feedback(
@@ -311,8 +299,7 @@ async def handle_feedback() -> None:
             st.error(f"Error recording feedback: {e}")
             st.stop()
         st.session_state.last_feedback = (latest_run_id, feedback)
-        st.toast("Feedback recorded", icon=":material/reviews:")
-
+        st.toast("Feedback recorded", icon="⭐")
 
 if __name__ == "__main__":
     asyncio.run(main())
