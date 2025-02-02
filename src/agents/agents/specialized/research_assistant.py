@@ -67,8 +67,15 @@ instructions = f"""
 def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
     logger.info(f"Binding tools to model: {[t.name for t in tools]}")
     model = model.bind_tools(tools)
+    
+    def preprocess_messages(state):
+        # Filter out system messages and format tool responses
+        messages = state.get("messages", state.get("input", {}).get("messages", []))
+        filtered_messages = [m for m in messages if getattr(m, 'type', None) != "system"]
+        return [SystemMessage(content=instructions)] + filtered_messages
+    
     preprocessor = RunnableLambda(        
-        lambda state: [SystemMessage(content=instructions)] + state.get("messages", state.get("input", {}).get("messages", [])),        
+        preprocess_messages,        
         name="ResearchAssistantPreprocessor"
     )
     return preprocessor | model
@@ -83,8 +90,8 @@ async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
     logger.info("Research assistant processing response")
     logger.info("Research assistant processing response")
 
-    # Handle remaining steps limit
-    if state["remaining_steps"] < 2 and response.tool_calls:
+    # Handle remaining steps limit - more strict limit
+    if state.get("remaining_steps", 0) < 2 and response.tool_calls:
         logger.info("Not enough steps remaining, terminating early")
         return {
             "messages": [AIMessage(
@@ -103,27 +110,16 @@ async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
     is_streaming = streaming_state.get("is_streaming", False)
     has_tool_calls = bool(response.tool_calls)
     current_buffer = streaming_state.get("current_buffer")
-    
-    # For weather queries, ensure we use the weather tool
-    if not has_tool_calls and "Weather" in [t.name for t in tools]:
-        message_text = state.messages[-1].content.lower()
-        if any(pattern in message_text for pattern in ["weather", "temperature", "forecast"]):
-            logger.info("Weather query detected, forcing weather tool usage")
-            response.tool_calls = [{
-                "id": "weather-lookup",
-                "type": "function",
-                "function": {
-                    "name": "Weather",
-                    "arguments": {"location": message_text}
-                }
-            }]
-            has_tool_calls = True
 
-    # Determine if we should terminate
+    # Enhanced termination logic
     should_terminate = (
-        not has_tool_calls and  # No more tool calls needed
-        (not is_streaming or  # Not streaming
-         (current_buffer and current_buffer.get("is_complete", False)))  # Or stream complete
+        # Terminate if:
+        (not has_tool_calls or  # No more tool calls needed OR
+         state.get("remaining_steps", 0) < 1) and  # Critical low on steps
+        # AND ensure streaming is complete if active
+        (not is_streaming or  # Not streaming OR
+         (current_buffer and current_buffer.get("is_complete", False)) or  # Stream complete OR
+         state.get("remaining_steps", 0) < 1)  # Force complete if critically low on steps
     )
 
     result_state = {
