@@ -33,9 +33,110 @@ async def main() -> None:
     logger.info("Starting Streamlit application")
     st.set_page_config(
         page_title=APP_TITLE,
+        page_icon="🌐",
         layout="wide",
-        menu_items={},
+        initial_sidebar_state="expanded"
     )
+
+    # Custom CSS for modern, minimal UI
+    st.markdown("""
+        <style>
+        /* Main app styling */
+        .stApp {
+            background-color: var(--background-color);
+        }
+        
+        /* Chat containers */
+        .stChatMessage {
+            background-color: transparent !important;
+            padding: 0.5rem 0 !important;
+        }
+        
+        .stChatMessageContent {
+            background-color: var(--secondary-background-color) !important;
+            border-radius: 8px !important;
+            border: 1px solid rgba(128, 128, 128, 0.1) !important;
+        }
+        
+        /* User messages */
+        .stChatMessageContent[data-testid="userChatMessage"] {
+            background-color: #2E7DAF !important;
+            color: white !important;
+        }
+        
+        /* Assistant messages */
+        .stChatMessageContent[data-testid="assistantChatMessage"] {
+            background-color: var(--secondary-background-color) !important;
+            color: var(--text-color) !important;
+        }
+        
+        /* Input box styling */
+        .stChatInputContainer {
+            padding: 0.5rem !important;
+            background-color: var(--background-color) !important;
+            border-top: 1px solid rgba(128, 128, 128, 0.2) !important;
+        }
+        
+        /* Hide Streamlit branding */
+        #MainMenu, footer, header {
+            visibility: hidden;
+        }
+        
+        /* Status indicators */
+        .stStatus {
+            background-color: var(--secondary-background-color) !important;
+            border: 1px solid rgba(128, 128, 128, 0.1) !important;
+            border-radius: 4px !important;
+        }
+        
+        /* Buttons and interactive elements */
+        .stButton button {
+            border-radius: 4px !important;
+            background-color: #2E7DAF !important;
+            color: white !important;
+        }
+        
+        /* Code blocks */
+        pre {
+            background-color: var(--secondary-background-color) !important;
+            border-radius: 4px !important;
+            padding: 0.75rem !important;
+            border: 1px solid rgba(128, 128, 128, 0.1) !important;
+        }
+        
+        /* Tabs styling */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            background-color: transparent;
+        }
+        
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 4px;
+            padding: 4px 12px;
+            background-color: var(--secondary-background-color);
+            color: var(--text-color);
+        }
+        
+        .stTabs [aria-selected="true"] {
+            background-color: #2E7DAF !important;
+            color: white !important;
+        }
+        
+        /* Message container */
+        div[data-testid="stMarkdownContainer"] > div {
+            background: var(--secondary-background-color) !important;
+            border-radius: 4px !important;
+            padding: 0.75rem !important;
+            margin: 0.25rem 0 !important;
+            color: var(--text-color) !important;
+        }
+
+        /* Ensure text visibility */
+        .stMarkdown, .stMarkdown p {
+            color: var(--text-color) !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     # Hide the streamlit upper-right chrome
     st.html(
@@ -94,12 +195,16 @@ async def main() -> None:
         st.session_state.messages = messages
         st.session_state.thread_id = thread_id
 
-    # Sidebar
+    # Sidebar with updated styling
     with st.sidebar:
-        st.header(APP_TITLE)
-        ""
-        "AI orchestrator powered by LangGraph"
-        with st.expander("i️ About", expanded=False):
+        st.markdown(f"""
+            <div style="color: var(--text-color);">
+                <h1 style="margin-bottom: 0;">{APP_TITLE}</h1>
+                <p style="margin-top: 8px; opacity: 0.8;">AI orchestrator powered by LangGraph</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("ℹ️ About", expanded=False):
             st.markdown("""
             This AI orchestrator:
             - Routes tasks to specialized agents
@@ -107,6 +212,7 @@ async def main() -> None:
             - Manages tool execution
             - Provides error recovery
             """)
+            
         with st.popover("⚙️ Settings", use_container_width=True):
             model_idx = agent_client.info.models.index(agent_client.info.default_model)
             model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
@@ -178,35 +284,52 @@ async def main() -> None:
 async def draw_messages(messages_agen, is_new=False):
     """Draw messages from the async generator."""
     try:
-        placeholder = st.empty() 
-        current_content = ""
+        container = st.empty()
+        full_response = ""
         
         async for msg in messages_agen:
             try:
                 # Handle both dict and ChatMessage types
                 msg_type = msg.type if isinstance(msg, ChatMessage) else msg.get("type")
-                msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content", "")
+                msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content")
+                tool_calls = getattr(msg, 'tool_calls', None) or msg.get('tool_calls', None)
                 
+                # Skip system messages
+                if msg_type == "system":
+                    continue
+
+                # Handle errors
                 if msg_type == "error":
                     st.error(f"Error: {msg_content}")
                     continue
-                    
-                # Handle other message types
-                if msg_type in ["message", "token", "ai"]:
-                    # Extract content from structured messages
-                    if isinstance(msg_content, dict) and "content" in msg_content:
-                        msg_content = msg_content["content"]
-                    elif isinstance(msg_content, dict) and "text" in msg_content:
-                        msg_content = msg_content["text"]
-                    
-                    # Append new content
-                    if msg_content:
-                        current_content += str(msg_content)
-                    
-                    # Update display
-                    with placeholder.container():
-                        st.markdown(current_content)
+
+                # Handle tool calls with status indicators
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        tool_name = tool_call.get('function', {}).get('name', 'Tool')
+                        tool_args = tool_call.get('function', {}).get('arguments', {})
                         
+                        with st.status(f"🔧 Running: {tool_name}", expanded=True) as status:
+                            if isinstance(tool_args, str):
+                                st.code(tool_args, language='json')
+                            else:
+                                st.json(tool_args)
+                            if msg_content:
+                                st.markdown(f"**Result:**\n{msg_content}")
+                            status.update(label=f"✅ Completed: {tool_name}", state="complete")
+                    continue
+
+                # Handle regular message content
+                if msg_content:
+                    if isinstance(msg_content, dict):
+                        msg_content = msg_content.get('content', '') or msg_content.get('text', '')
+                    
+                    full_response += str(msg_content)
+                    container.markdown(f"""
+                    <div style='background: #f0f2f6; border-radius: 1rem; padding: 1rem; margin: 0.5rem 0;'>
+                    {full_response}</div>
+                    """, unsafe_allow_html=True)
+
                 # Allow other tasks to run
                 await asyncio.sleep(0)
                         
