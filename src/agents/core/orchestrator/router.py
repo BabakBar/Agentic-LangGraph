@@ -134,8 +134,12 @@ class OrchestratorRouter:
                     return BaseCommand(
                         goto=decision["next"],
                         update={
-                            "routing": state.routing.model_dump(),
-                            "streaming": state.streaming.model_dump()
+                            "routing": RoutingMetadata.model_validate(
+                                state.routing.model_dump()
+                            ).model_dump(),
+                            "streaming": StreamingState.model_validate(
+                                state.streaming.model_dump()
+                            ).model_dump()
                         }
                     )
                 
@@ -180,34 +184,41 @@ class OrchestratorRouter:
                 return BaseCommand(
                     goto=state.routing.current_agent,
                     update={
-                        "routing": state.routing.model_dump(),
-                        "streaming": state.streaming.model_dump()
+                        "routing": RoutingMetadata.model_validate(
+                            state.routing.model_dump()
+                        ).model_dump(),
+                        "streaming": StreamingState.model_validate(
+                            state.streaming.model_dump()
+                        ).model_dump()
                     }
                 )
             
             # Create routing metadata with current agent
-            routing_data = {
+            routing_data = RoutingMetadata.model_validate({
                 "current_agent": decision.next,
                 "decisions": state.routing.decisions + [decision_dict],
                 "errors": state.routing.errors,
                 "error_count": state.routing.error_count,
                 "fallback_count": state.routing.fallback_count,
                 "start_time": state.routing.start_time
-            }
+            })
             
             # Update state preserving all fields
             updated_state = state.model_copy(update={
                 "next": decision.next,
-                "routing": routing_data
+                "routing": routing_data.model_validate(routing_data.model_dump())
             })
             logger.info(f"Updated routing state: current_agent={updated_state.routing.current_agent}, next={updated_state.next}")
             
             return BaseCommand(
                 goto=decision.next,
                 update={
-                    "routing": routing_data,
-                    "streaming": state.streaming.model_dump()
-                }
+                    "routing": RoutingMetadata.model_validate(
+                        routing_data.model_dump()
+                    ).model_dump(),
+                    "streaming": StreamingState.model_validate(
+                        state.streaming.model_dump()
+                    ).model_dump()}
             )
             
         except (RouterError, AgentNotFoundError) as e:
@@ -237,8 +248,12 @@ class OrchestratorRouter:
             return BaseCommand(
                 goto="chatbot",
                 update={
-                    "routing": updated_state.routing.model_dump(),
-                    "streaming": {"is_streaming": False, "current_buffer": None, "buffers": {}}
+                    "routing": RoutingMetadata.model_validate(
+                        updated_state.routing.model_dump()
+                    ).model_dump(),
+                    "streaming": StreamingState.model_validate({
+                        "is_streaming": False, "current_buffer": None, "buffers": {}
+                    }).model_dump()
                 }
             )
         except Exception as e:
@@ -248,9 +263,13 @@ class OrchestratorRouter:
             return BaseCommand(
                 goto="error_recovery",
                 update={
-                    "routing": error_state.routing.model_dump(),
-                    "streaming": {"is_streaming": False, "current_buffer": None, "buffers": {}},
-                    "errors": error_state.errors
+                    "routing": RoutingMetadata.model_validate(
+                        error_state.routing.model_dump()
+                    ).model_dump(),
+                    "streaming": StreamingState.model_validate({
+                        "is_streaming": False, "current_buffer": None, "buffers": {}
+                    }).model_dump(),
+                    "errors": [error.model_dump() for error in error_state.errors]
                 }
             )
     
@@ -383,3 +402,145 @@ def should_continue(state: OrchestratorState) -> str:
     
     # End if no next agent
     return "end"
+
+class RouterNode:
+    async def route(self, state, message):
+        """Route a message to the appropriate agent."""
+        try:
+            # Ensure state is properly validated
+            if isinstance(state, dict):
+                logger.debug("Converting dict to OrchestratorState")
+                state = OrchestratorState.model_validate(state)
+            elif isinstance(state, OrchestratorState):
+                logger.debug("Validating existing OrchestratorState")
+                state = state.model_validate(state.model_dump())
+            else:
+                logger.error(f"Unexpected state type in RouterNode.route: {type(state)}")
+                # Preserve messages if they exist in the invalid state
+                messages = []
+                if hasattr(state, 'messages'):
+                    messages = state.messages
+                
+                agent_ids = [id for id in self.router.agents.keys()]
+                # Create new state with preserved messages
+                state = create_initial_state(messages, agent_ids)
+
+            # Handle message formatting
+            if isinstance(message, dict):
+                message = message.get('content', message)
+            logger.debug(f"Processing message: {message}")
+                
+            # Process the message
+            router = create_router()
+            logger.debug("Created router, getting routing decision")
+            command = await router.route(state, {"config": {}})
+            
+            if command and command.update:
+                logger.debug(f"Applying command update: {command.update}")
+                update_data = command.update.copy()
+                
+                # Validate routing and streaming data before update
+                if "routing" in update_data:
+                    logger.debug("Validating routing update in route")
+                    update_data["routing"] = RoutingMetadata.model_validate(
+                        update_data["routing"]).model_dump()
+                if "streaming" in update_data:
+                    logger.debug("Validating streaming update in route")
+                    update_data["streaming"] = StreamingState.model_validate(
+                        update_data["streaming"]).model_dump()
+                
+                state = state.model_copy(update=update_data)
+                logger.debug(f"New state: current_agent={state.routing.current_agent}, next={state.next}")
+            return state
+                
+        except Exception as e:
+            logger.error(f"Error in RouterNode: {str(e)}")
+            if isinstance(state, OrchestratorState):
+                logger.debug("Adding error to existing state")
+                error_state = state.add_error(str(e), "RouterError", None, {"message": message})
+            else:
+                logger.error(f"Unexpected state type in RouterNode.route error handler: {type(state)}")
+                # Preserve messages if they exist in the invalid state
+                messages = []
+                if hasattr(state, 'messages'):
+                    messages = state.messages
+                
+                agent_ids = [id for id in self.router.agents.keys()]
+                # Create new state with preserved messages
+                error_state = create_initial_state(messages, agent_ids)
+                error_state = error_state.add_error(str(e), "RouterError", None, {"message": message})
+            
+            # Log the error state for debugging
+            logger.debug(f"Error state: current_agent={error_state.routing.current_agent}, "
+                        f"error_count={error_state.routing.error_count}")
+            return error_state
+
+    async def handle_message(self, state, message):
+        """Handle an incoming message."""
+        try:
+            # Convert state to OrchestratorState if it's a dict
+            if isinstance(state, dict):
+                logger.debug("Converting dict to OrchestratorState in handle_message")
+                state = OrchestratorState.model_validate(state)
+            elif isinstance(state, OrchestratorState):
+                logger.debug("Validating existing OrchestratorState in handle_message")
+                state = state.model_validate(state.model_dump())
+            else:
+                logger.error(f"Unexpected state type in handle_message: {type(state)}")
+                # Preserve messages if they exist in the invalid state
+                messages = []
+                if hasattr(state, 'messages'):
+                    messages = state.messages
+                
+                agent_ids = [id for id in self.router.agents.keys()]
+                # Create new state with preserved messages
+                state = create_initial_state(messages, agent_ids)
+
+            if isinstance(message, dict):
+                message = message.get('content', message)
+            logger.debug(f"Processing message in handle_message: {message}")
+            
+            # Process the message using the router
+            router = create_router()
+            command = await router.route(state, {"config": {}})
+            
+            # Update state based on command
+            if command and command.update:
+                logger.debug(f"Applying command update in handle_message: {command.update}")
+                update_data = command.update.copy()
+                
+                # Validate the update data
+                if "routing" in update_data:
+                    logger.debug("Validating routing update")
+                    update_data["routing"] = RoutingMetadata.model_validate(
+                        update_data["routing"]).model_dump()
+                if "streaming" in update_data:
+                    logger.debug("Validating streaming update")
+                    update_data["streaming"] = StreamingState.model_validate(
+                        update_data["streaming"]).model_dump()
+                
+                state = state.model_copy(update=update_data)
+                state = state.model_copy(update=command.update)
+                logger.debug(f"Updated state: current_agent={state.routing.current_agent}, "
+                           f"next={state.next}, error_count={state.routing.error_count}")
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error handling message: {str(e)}")
+            if not isinstance(state, OrchestratorState):
+                logger.error(f"Unexpected state type in handle_message error handler: {type(state)}")
+                # Preserve messages if they exist in the invalid state
+                messages = []
+                if hasattr(state, 'messages'):
+                    messages = state.messages
+                
+                agent_ids = [id for id in self.router.agents.keys()]
+                # Create new state with preserved messages
+                state = create_initial_state(messages, agent_ids)
+            return state.add_error(
+                str(e),
+                "RouterError",
+                None,
+                {"message": message}
+            )

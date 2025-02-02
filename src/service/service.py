@@ -1,3 +1,4 @@
+"""Service implementation for the agent API."""
 import json
 import asyncio
 import logging
@@ -20,6 +21,7 @@ from langsmith import Client as LangsmithClient
 
 from agents import DEFAULT_AGENT, get_agent, get_all_agent_info
 from core import settings
+from core.logging_config import setup_logging
 from schema import (
     ChatHistory,
     ChatHistoryInput,
@@ -35,14 +37,17 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
+from agents.core.orchestrator.state import create_initial_state, OrchestratorState, RoutingMetadata, StreamingState, CURRENT_VERSION
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
 
+# Set up logging with environment LOG_LEVEL
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
 # Ensure data directory exists
 os.makedirs("/app/data", exist_ok=True)
 DB_PATH = "/app/data/checkpoints.db"
-
 
 def verify_bearer(
     http_auth: Annotated[
@@ -56,23 +61,18 @@ def verify_bearer(
     if not http_auth or http_auth.credentials != auth_secret:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Construct agent with Sqlite checkpointer
-    # TODO: It's probably dangerous to share the same checkpointer on multiple agents
     async with AsyncSqliteSaver.from_conn_string(DB_PATH) as saver:
         agents = get_all_agent_info()
         for a in agents:
             agent = get_agent(a.key)
             agent.checkpointer = saver
         yield
-    # context manager will clean up the AsyncSqliteSaver on exit
-
 
 app = FastAPI(lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(verify_bearer)])
-
 
 @router.get("/info")
 async def info() -> ServiceMetadata:
@@ -84,7 +84,6 @@ async def info() -> ServiceMetadata:
         default_agent=DEFAULT_AGENT,
         default_model=settings.DEFAULT_MODEL,
     )
-
 
 @router.get("/debug/orchestrator")
 async def debug_orchestrator():
@@ -99,38 +98,29 @@ def _parse_input(user_input: UserInput) -> tuple[dict[str, Any], UUID]:
     # Get list of available agent IDs from registered agents
     agent_ids = [agent.key for agent in get_all_agent_info()]
     
-    # Create initial state with all required fields
-    initial_state = {
-        "messages": [HumanMessage(content=user_input.message)],
-        "routing": {
-            "current_agent": None,  # Let router decide initial agent
-            "decisions": [],
-            "error_count": 0,
-            "errors": []
-        },
-        "streaming": {"is_streaming": False, "current_buffer": None, "buffers": {}},
-        "agent_ids": agent_ids,  # Include available agent IDs
-        "next_agent": None,
-        "schema_version": "2.0"
-    }
+    logger.debug("Creating initial state in _parse_input")
+    # Create initial state with agent_ids using model_copy since OrchestratorState is frozen
+    state = create_initial_state([HumanMessage(content=user_input.message)]).model_copy(update={"agent_ids": agent_ids})
+    # Convert to dictionary before passing to LangGraph
+    initial_state = state.model_dump()
+    logger.debug(f"Initial state type: {type(initial_state)}")
+    logger.debug(f"Initial state dict: {initial_state}")
     
     kwargs = {
-        "input": initial_state,
-        "config": RunnableConfig(configurable={"thread_id": thread_id, "model": user_input.model}, run_id=run_id),
+        "input": initial_state,  # Pass dictionary instead of model instance
+        "config": RunnableConfig(
+            configurable={"thread_id": thread_id, "model": user_input.model},
+            run_id=run_id,
+            version=CURRENT_VERSION
+        ),
     }
+    logger.debug(f"Kwargs for LangGraph: {kwargs}")
     return kwargs, run_id
-
 
 @router.post("/{agent_id}/invoke")
 @router.post("/invoke")
 async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:
-    """
-    Invoke an agent with user input to retrieve a final response.
-
-    If agent_id is not provided, the default agent will be used.
-    Use thread_id to persist and continue a multi-turn conversation. run_id kwarg
-    is also attached to messages for recording feedback.
-    """
+    """Invoke an agent with user input to retrieve a final response."""
     agent: CompiledStateGraph = get_agent(agent_id)
     kwargs, run_id = _parse_input(user_input)
     try:
@@ -142,23 +132,28 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         logger.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
-
 async def message_generator(
     user_input: StreamInput, agent_id: str = DEFAULT_AGENT
 ) -> AsyncGenerator[str, None]:
-    """
-    Generate a stream of messages from the agent.
-
-    This is the workhorse method for the /stream endpoint.
-    """
-    agent: CompiledStateGraph = get_agent(agent_id)
-    kwargs, run_id = _parse_input(user_input)
-
-    # Process streamed events from the graph and yield messages over the SSE stream.
-    logger.debug(f"Starting stream for agent {agent_id} with kwargs: {kwargs}")
-    
+    """Generate a stream of messages from the agent."""
     try:
+        agent = get_agent(agent_id)
+        if not agent:
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Agent {agent_id} not found'})}\n\n"
+            return
+            
+        kwargs, run_id = _parse_input(user_input)
+        
+        # Process streamed events from the graph and yield messages over the SSE stream.
+        logger.debug(f"Starting stream for agent {agent_id} with kwargs: {kwargs}")
+        
         async for event in agent.astream_events(**kwargs, version="v2"):
+            if event and event["event"] == "on_chain_end":
+                if "data" in event and "output" in event["data"]:
+                    output = event["data"]["output"]
+                    logger.debug(f"Chain end output type: {type(output)}")
+                    if hasattr(output, "model_dump"):
+                        logger.debug(f"Chain end output dump: {output.model_dump()}")
             logger.debug(f"Received event: {event}")
             if not event:
                 continue
@@ -167,8 +162,6 @@ async def message_generator(
             # Yield messages written to the graph state after node execution finishes.
             if (
                 event["event"] == "on_chain_end"
-                # on_chain_end gets called a bunch of times in a graph execution
-                # This filters out everything except for "graph node finished"
                 and any(t.startswith("graph:step:") for t in event.get("tags", []))
             ):
                 logger.debug("Processing chain end event with messages")
@@ -177,7 +170,7 @@ async def message_generator(
                 # Handle Command objects
                 if hasattr(output, "update") and isinstance(output.update, dict):
                     if "messages" in output.update:
-                        new_messages = output.update["messages"]
+                        new_messages = output.update.get("messages", [])
                 # Handle direct message updates
                 elif isinstance(output, dict) and "messages" in output:
                     new_messages = output["messages"]
@@ -206,76 +199,45 @@ async def message_generator(
                 logger.debug("Processing chat model stream event")
                 content = remove_tool_calls(event["data"]["chunk"].content)
                 if content:
-                    # Empty content in the context of OpenAI usually means
-                    # that the model is asking for a tool to be invoked.
-                    # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
                 continue
 
     except asyncio.CancelledError:
         logger.info("Stream cancelled by client")
         try:
-            # Send a final message to client
             yield f"data: {json.dumps({'type': 'status', 'content': 'Stream cancelled'})}\n\n"
         except Exception:
-            # If we can't send the status message, just return silently
             pass
         finally:
-            # Ensure we always return to break the stream
             return
             
     except Exception as e:
-        logger.error(f"Error in message stream: {str(e)}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Stream error occurred'})}\n\n"
-        return
-
-    logger.debug("Stream completed")
-    yield "data: [DONE]\n\n"
-
-
-def _sse_response_example() -> dict[int, Any]:
-    return {
-        status.HTTP_200_OK: {
-            "description": "Server Sent Event Response",
-            "content": {
-                "text/event-stream": {
-                    "example": "data: {'type': 'token', 'content': 'Hello'}\n\ndata: {'type': 'token', 'content': ' World'}\n\ndata: [DONE]\n\n",
-                    "schema": {"type": "string"},
-                }
-            },
-        }
-    }
-
+        logger.error(f"Stream generation error: {e}")
+        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
 
 @router.post(
-    "/{agent_id}/stream", response_class=StreamingResponse, responses=_sse_response_example()
+    "/{agent_id}/stream", response_class=StreamingResponse
 )
-@router.post("/stream", response_class=StreamingResponse, responses=_sse_response_example())
+@router.post("/stream", response_class=StreamingResponse)
 async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> StreamingResponse:
-    """
-    Stream an agent's response to a user input, including intermediate messages and tokens.
-
-    If agent_id is not provided, the default agent will be used.
-    Use thread_id to persist and continue a multi-turn conversation. run_id kwarg
-    is also attached to all messages for recording feedback.
-
-    Set `stream_tokens=false` to return intermediate messages but not token-by-token.
-    """
-    return StreamingResponse(
-        message_generator(user_input, agent_id),
-        media_type="text/event-stream",
-    )
-
+    """Stream an agent's response to a user input."""
+    try:
+        return StreamingResponse(
+            message_generator(user_input, agent_id),
+            media_type="text/event-stream",
+        )
+    except Exception as e:
+        logger.error(f"Stream error: {e}")
+        async def error_generator():
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
 
 @router.post("/feedback")
 async def feedback(feedback: Feedback) -> FeedbackResponse:
-    """
-    Record feedback for a run to LangSmith.
-
-    This is a simple wrapper for the LangSmith create_feedback API, so the
-    credentials can be stored and managed in the service rather than the client.
-    See: https://api.smith.langchain.com/redoc#tag/feedback/operation/create_feedback_api_v1_feedback_post
-    """
+    """Record feedback for a run to LangSmith."""
     client = LangsmithClient()
     kwargs = feedback.kwargs or {}
     client.create_feedback(
@@ -286,13 +248,9 @@ async def feedback(feedback: Feedback) -> FeedbackResponse:
     )
     return FeedbackResponse()
 
-
 @router.post("/history")
 def history(input: ChatHistoryInput) -> ChatHistory:
-    """
-    Get chat history.
-    """
-    # TODO: Hard-coding DEFAULT_AGENT here is wonky
+    """Get chat history."""
     agent: CompiledStateGraph = get_agent(DEFAULT_AGENT)
     try:
         state_snapshot = agent.get_state(
@@ -309,11 +267,58 @@ def history(input: ChatHistoryInput) -> ChatHistory:
         logger.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
 
-
 app.include_router(router)
+
+class AgentService:
+    async def stream_response(self, message):
+        try:
+            # Initialize state if needed
+            state = None
+            if isinstance(message, str):
+                message = {"content": message}
+            
+            # Create initial state
+            state = create_initial_state([HumanMessage(content=message["content"])]).model_dump()
+            logger.debug(f"AgentService stream_response initial state type: {type(state)}")
+            logger.debug(f"AgentService stream_response initial state: {state}")
+            
+            try:
+                response = await self.orchestrator.process_message(state, message)
+                
+                if isinstance(response, dict):
+                    yield response
+                elif isinstance(response, OrchestratorState):
+                    # Extract the last message from state
+                    if response.messages:
+                        last_message = response.messages[-1]
+                        yield {"type": "message", "content": str(last_message.content)}
+                else:
+                    yield {"type": "message", "content": str(response)}
+                    
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+                yield {"type": "error", "content": f"Error processing message: {str(e)}"}
+                
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield {"type": "error", "content": str(e)}
+
+    async def invoke(self, message):
+        try:
+            if isinstance(message, str):
+                message = {"content": message}
+            
+            state = create_initial_state([HumanMessage(content=message["content"])]).model_dump()
+            logger.debug(f"AgentService invoke initial state type: {type(state)}")
+            logger.debug(f"AgentService invoke initial state: {state}")
+            response = await self.orchestrator.process_message(state, message)
+            return {"type": "message", "content": str(response.messages[-1].content) if response.messages else "No response"}
+            
+        except Exception as e:
+            logger.error(f"Invoke error: {e}")
+            return {"type": "error", "content": f"Error processing message: {str(e)}"}

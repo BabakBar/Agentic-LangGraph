@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncGenerator, Generator
-from typing import Any
+from typing import Any, Optional, Dict, Union
 
 import httpx
 
@@ -167,29 +167,41 @@ class AgentClient:
 
         return ChatMessage.model_validate(response.json())
 
-    def _parse_stream_line(self, line: str) -> ChatMessage | str | None:
-        line = line.strip()
-        if line.startswith("data: "):
-            data = line[6:]
-            if data == "[DONE]":
+    def _parse_stream_line(self, line: str) -> Optional[Dict[str, Any]]:
+        """Parse a line from the SSE stream or raw JSON."""
+        try:
+            if not line or line == "[DONE]":
                 return None
-            try:
-                parsed = json.loads(data)
-            except Exception as e:
-                raise Exception(f"Error JSON parsing message from server: {e}")
-            match parsed["type"]:
-                case "message":
-                    # Convert the JSON formatted message to an AnyMessage
-                    try:
-                        return ChatMessage.model_validate(parsed["content"])
-                    except Exception as e:
-                        raise Exception(f"Server returned invalid message: {e}")
-                case "token":
-                    # Yield the str token directly
-                    return parsed["content"]
-                case "error":
-                    raise Exception(parsed["content"])
-        return None
+            
+            if line.startswith("data: "):
+                data = line[6:]
+            else:
+                data = line
+            
+            parsed = json.loads(data)
+            
+            # Handle error messages properly
+            if parsed.get("type") == "error":
+                logger.error(f"Error from server: {parsed.get('content')}")
+                return {
+                    "type": "error",
+                    "content": parsed.get("content", "Unknown error")
+                }
+            
+            return parsed
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse stream line: {line}, error: {e}")
+            return {
+                "type": "error",
+                "content": f"Failed to parse response: {str(e)}"
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error parsing stream line: {e}")
+            return {
+                "type": "error",
+                "content": f"Unexpected error: {str(e)}"
+            }
 
     def stream(
         self,
@@ -243,56 +255,40 @@ class AgentClient:
 
     async def astream(
         self,
-        message: str,
-        model: str | None = None,
-        thread_id: str | None = None,
-        stream_tokens: bool = True,
-    ) -> AsyncGenerator[ChatMessage | str, None]:
-        """
-        Stream the agent's response asynchronously.
-
-        Each intermediate message of the agent process is yielded as an AnyMessage.
-        If stream_tokens is True (the default value), the response will also yield
-        content tokens from streaming modelsas they are generated.
-
-        Args:
-            message (str): The message to send to the agent
-            model (str, optional): LLM model to use for the agent
-            thread_id (str, optional): Thread ID for continuing a conversation
-            stream_tokens (bool, optional): Stream tokens as they are generated
-                Default: True
-
-        Returns:
-            AsyncGenerator[ChatMessage | str, None]: The response from the agent
-        """
-        if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
-        request = StreamInput(message=message, stream_tokens=stream_tokens)
-        if thread_id:
-            request.thread_id = thread_id
-        if model:
-            request.model = model
-        async with httpx.AsyncClient() as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/{self.agent}/stream",
-                    json=request.model_dump(),
-                    headers=self._headers,
-                    timeout=self.timeout,
-                ) as response:
+        message: Union[str, Dict[str, Any]],
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream responses from the agent service."""
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/orchestrator/stream"
+                
+                # Format message properly
+                if isinstance(message, str):
+                    data = {"message": message}
+                else:
+                    data = message
+                    
+                async with client.stream("POST", url, json=data) as response:
                     response.raise_for_status()
-                    logger.debug("Stream connection established")
+                    
                     async for line in response.aiter_lines():
-                        if line.strip():
-                            logger.debug(f"Received line: {line[:100]}...")
-                            parsed = self._parse_stream_line(line)
-                            if parsed is None:
-                                break
-                            yield parsed
-            except httpx.HTTPError as e:
-                logger.error(f"Stream error: {e}")
-                raise AgentClientError(f"Error: {e}")
+                        if not line.strip():
+                            continue
+                            
+                        parsed = self._parse_stream_line(line)
+                        if parsed:
+                            if parsed["type"] == "error":
+                                logger.error(f"Stream error: {parsed['content']}")
+                                yield parsed
+                            else:
+                                yield parsed
+                            
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error during streaming: {e}")
+            yield {"type": "error", "content": f"Connection error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Unexpected error during streaming: {e}")
+            yield {"type": "error", "content": f"Stream error: {str(e)}"}
 
     async def acreate_feedback(
         self, run_id: str, key: str, score: float, kwargs: dict[str, Any] = {}

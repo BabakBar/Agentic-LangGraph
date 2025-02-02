@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 from langchain_core.runnables import RunnableConfig
+from agents.core.orchestrator.state import CURRENT_VERSION
 
 load_dotenv()
 
@@ -15,7 +16,10 @@ async def main() -> None:
     inputs = {"messages": [("user", "Find me a recipe for chocolate chip cookies")]}
     result = await agent.ainvoke(
         inputs,
-        config=RunnableConfig(configurable={"thread_id": uuid4()}),
+        config=RunnableConfig(
+            configurable={"thread_id": uuid4()},
+            version=CURRENT_VERSION
+        ),
     )
     result["messages"][-1].pretty_print()
 

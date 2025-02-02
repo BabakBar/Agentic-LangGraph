@@ -1,6 +1,7 @@
 """Streamlit app for interacting with the orchestrator agent."""
 import asyncio
 import os
+import logging
 from collections.abc import AsyncGenerator
 from typing import Optional
 
@@ -13,6 +14,14 @@ from client import AgentClient, AgentClientError
 from schema import ChatHistory, ChatMessage
 from schema.task_data import TaskData, TaskDataStatus
 from client.monitoring_dashboard import draw_metrics_dashboard
+from client.logging_config import setup_logging
+
+# Set up logging with environment LOG_LEVEL
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+logging.getLogger('watchdog').setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 APP_TITLE = "Agentic Orixa"
 WELCOME_MESSAGE = """
@@ -21,6 +30,7 @@ Just ask me anything!
 
 async def main() -> None:
     """Main app entry point."""
+    logger.info("Starting Streamlit application")
     st.set_page_config(
         page_title=APP_TITLE,
         layout="wide",
@@ -43,6 +53,14 @@ async def main() -> None:
         st.set_option("client.toolbarMode", "minimal")
         await asyncio.sleep(0.1)
         st.rerun()
+
+    # Initialize session state variables
+    if "last_message" not in st.session_state:
+        st.session_state.last_message = None
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "last_feedback" not in st.session_state:
+        st.session_state.last_feedback = (None, None)
 
     # Initialize agent client
     if "agent_client" not in st.session_state:
@@ -98,7 +116,7 @@ async def main() -> None:
     tab1, tab2 = st.tabs(["💬 Chat", "📊 Monitoring"])
 
     with tab1:  # Chat Interface
-        messages: list[ChatMessage] = st.session_state.messages
+        messages = st.session_state.messages
 
         if len(messages) == 0:
             with st.chat_message("ai"):
@@ -113,25 +131,36 @@ async def main() -> None:
 
         # Handle new user input
         if user_input := st.chat_input():
+            thread_id = st.session_state.thread_id
             messages.append(ChatMessage(type="human", content=user_input))
             st.chat_message("human").write(user_input)
+            
+            message_container = st.chat_message("ai")
+            st.session_state.last_message = message_container
+            
             try:
-                if use_streaming:
-                    stream = agent_client.astream(
-                        message=user_input,
-                        model=model,
-                        thread_id=st.session_state.thread_id
-                    )
-                    await draw_messages(stream, is_new=True)
-                else:
-                    response = await agent_client.ainvoke(
-                        message=user_input,
-                        model=model,
-                        thread_id=st.session_state.thread_id,
-                    )
-                    messages.append(response)
-                    st.chat_message("ai").write(response.content)
-                st.rerun()
+                with message_container:
+                    if use_streaming:
+                        try:
+                            stream = agent_client.astream(
+                                message={"message": user_input, "model": model, "thread_id": thread_id}
+                            )
+                            await draw_messages(stream, is_new=True)
+                        except asyncio.CancelledError:
+                            logger.info("Stream cancelled by user")
+                            return
+                    else:
+                        try:
+                            response = await agent_client.ainvoke(
+                                message=user_input,
+                                model=model,
+                                thread_id=thread_id,
+                            )
+                            messages.append(response)
+                            st.write(response.content)
+                        except asyncio.CancelledError:
+                            logger.info("Request cancelled by user")
+                            return
             except AgentClientError as e:
                 st.error(f"Error: {str(e)}")
                 if "routing" in str(e).lower():
@@ -139,144 +168,50 @@ async def main() -> None:
                 st.stop()
 
         # Show feedback widget
-        if len(messages) > 0 and st.session_state.last_message:
+        if len(messages) > 0 and st.session_state.last_message is not None:
             with st.session_state.last_message:
                 await handle_feedback()
 
     with tab2:  # Monitoring Dashboard
         draw_metrics_dashboard()
 
-async def draw_messages(
-    messages_agen: AsyncGenerator[ChatMessage | str, None],
-    is_new: bool = False,
-) -> None:
-    """Draw chat messages with streaming and tool call support."""
-    # Track message state
-    last_message_type = None
-    st.session_state.last_message = None
-    streaming_content = ""
-    streaming_placeholder = None
-    routing_status = None
-
-    # Process messages
+async def draw_messages(messages_agen, is_new=False):
+    """Draw messages from the async generator."""
     try:
-        async for msg in messages_agen:            
-            if not msg:
+        placeholder = st.empty()
+        message_history = []
+        
+        async for msg in messages_agen:
+            try:
+                # Handle both dict and ChatMessage types
+                msg_type = msg.type if isinstance(msg, ChatMessage) else msg.get("type")
+                msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content")
+                
+                if msg_type == "error":
+                    st.error(f"Error: {msg_content}")
+                    continue
+                    
+                # Handle other message types
+                if msg_type in ["message", "token"]:
+                    message_history.append(msg)
+                    # Update display
+                    with placeholder.container():
+                        for m in message_history:
+                            st.write(m.content if isinstance(m, ChatMessage) else m["content"])
+                
+                # Allow other tasks to run
+                await asyncio.sleep(0)
+                        
+            except Exception as e:
+                logger.error(f"Error processing message: {e}", exc_info=True)
                 continue
-
-            # Handle streaming tokens
-            if isinstance(msg, str):
-                if not streaming_placeholder:
-                    if last_message_type != "ai":
-                        last_message_type = "ai"
-                        st.session_state.last_message = st.chat_message("ai")
-                    with st.session_state.last_message:
-                        streaming_placeholder = st.empty()
-                        routing_status = st.status("🤖 Orchestrator Processing", state="running")
-
-                streaming_content += msg
-                streaming_placeholder.write(streaming_content)
-                continue
-            elif isinstance(msg, ChatMessage):
-                # Handle different message types
-                match msg.type:
-                    case "human":
-                        last_message_type = "human"
-                        st.chat_message("human").write(msg.content)
-
-                    case "ai":
-                        if is_new:
-                            st.session_state.messages.append(msg)
-
-                        if last_message_type != "ai":
-                            last_message_type = "ai"
-                            st.session_state.last_message = st.chat_message("ai")
-
-                        with st.session_state.last_message:
-                            # Update routing status if present
-                            if routing_status and msg.metadata.get("routing_decision"):
-                                decision = msg.metadata["routing_decision"]
-                                routing_status.update(
-                                    label=f"🤖 Routed to: {decision['next_agent']}",
-                                    state="complete",
-                                    expanded=False
-                                )
-                                routing_status.markdown(f"""
-                                **Confidence:** {decision['confidence']:.2f}
-                                **Reason:** {decision['reasoning']}
-                                """)
-
-                            # Write message content
-                            if msg.content:
-                                if streaming_placeholder:
-                                    streaming_placeholder.write(msg.content)
-                                    streaming_content = ""
-                                    streaming_placeholder = None
-                                else:
-                                    st.write(msg.content)
-
-                            # Handle tool calls
-                            if msg.tool_calls:
-                                call_results = {}
-                                for tool_call in msg.tool_calls:
-                                    status = st.status(
-                                        f"""🔧 Tool: {tool_call["name"]}""",
-                                        state="running" if is_new else "complete",
-                                    )
-                                    call_results[tool_call["id"]] = status
-                                    status.write("Input:")
-                                    status.write(tool_call["args"])
-
-                                for _ in range(len(call_results)):
-                                    tool_result: ChatMessage = await anext(messages_agen)
-                                    if tool_result.type != "tool":
-                                        st.error(f"Unexpected message type: {tool_result.type}")
-                                        st.write(tool_result)
-                                        st.stop()
-
-                                    if is_new:
-                                        st.session_state.messages.append(tool_result)
-                                    status = call_results[tool_result.tool_call_id]
-                                    status.write("Output:")
-                                    status.write(tool_result.content)
-                                    status.update(state="complete")
-
-                    case "custom":
-                        try:
-                            task_data: TaskData = TaskData.model_validate(msg.custom_data)
-                        except ValidationError:
-                            st.error("Invalid custom data received")
-                            st.write(msg.custom_data)
-                            st.stop()
-
-                        if is_new:
-                            st.session_state.messages.append(msg)
-
-                        if last_message_type != "task":
-                            last_message_type = "task"
-                            st.session_state.last_message = st.chat_message(
-                                name="task",
-                                avatar="🔄"
-                            )
-                            with st.session_state.last_message:
-                                status = TaskDataStatus()
-
-                        status.add_and_draw_task_data(task_data)
-
-                    case _:
-                        st.error(f"Unknown message type: {msg.type}")
-                        st.write(msg)
-                        st.stop()
-            else:
-                st.error(f"Unexpected message type: {type(msg)}")
-                st.write(msg)
-                st.stop()
-
+                    
+    except asyncio.CancelledError:
+        logger.info("Message stream cancelled")
+        return
     except Exception as e:
-        st.error(f"Error processing messages: {e}")
-        if streaming_placeholder:
-            streaming_placeholder.write("Error: Failed to get response")
-        raise  # Re-raise to see the full error in logs
+        st.error(f"Error processing messages: {str(e)}")
+        logger.error(f"Error in draw_messages: {e}", exc_info=True)
 
 async def handle_feedback() -> None:
     """Handle user feedback collection."""

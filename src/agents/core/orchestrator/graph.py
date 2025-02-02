@@ -439,7 +439,7 @@ class ErrorRecoveryNode(GraphNode):
     async def _execute(self, state: OrchestratorState) -> Dict[str, Any]:
         """Handle error recovery."""
         # Check for max retries exceeded
-        if len(state.routing.get("errors", [])) >= self.config.max_retries:
+        if len(state.routing.errors) >= self.config.max_retries:
             logger.error("Maximum error retries reached; aborting further recursion.")
             return {"next": "abort", "state": state}
 
@@ -506,7 +506,7 @@ class ErrorRecoveryNode(GraphNode):
                     error_count=0  # Reset error count for fresh start
                 ),
                 streaming=StreamingState(),  # Fresh streaming state
-                tools=state.tools,
+                tool_state=state.tool_state,
                 agent_ids=state.agent_ids,
                 schema_version=state.schema_version
             )
