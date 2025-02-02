@@ -19,8 +19,10 @@ from ..agent_registry import AgentRegistry
 from ...common.types import (
     OrchestratorState,
     AgentError, RouterError, AgentNotFoundError,
-    AgentExecutionError, MaxErrorsExceeded
+    AgentExecutionError, MaxErrorsExceeded,
+    RoutingMetadata, StreamingState
 )
+from .state import create_initial_state
 
 
 logger = logging.getLogger(__name__)
@@ -166,6 +168,11 @@ class OrchestratorRouter:
                 
                 if any(re.search(pattern, message_text) for pattern in weather_patterns):
                     logger.info("Detected weather query, routing to research assistant")
+                    logger.debug("Current state", extra={
+                        "routing": state.routing.model_dump(),
+                        "next": state.next
+                    })
+                    
                     decision = RouterDecision(
                         next="research-assistant",
                         confidence=1.0,
@@ -173,6 +180,45 @@ class OrchestratorRouter:
                         capabilities_matched=["weather", "web_search"],
                         fallback_agents=["chatbot"]
                     )
+                    
+                    # Convert decision to dict and update routing
+                    decision_dict = decision.model_dump()
+                    
+                    try:
+                        # Create complete routing metadata
+                        routing_data = RoutingMetadata(
+                            current_agent="research-assistant",
+                            decisions=state.routing.decisions + [decision_dict],
+                            errors=state.routing.errors,
+                            error_count=state.routing.error_count,
+                            fallback_count=state.routing.fallback_count,
+                            start_time=state.routing.start_time
+                        ).model_dump()
+
+                        logger.debug("Updated state", extra={
+                            "routing": routing_data,
+                            "next": "research-assistant"
+                        })
+                        
+                        # Return command with complete routing data
+                        return BaseCommand(
+                            goto="research-assistant",
+                            update={
+                                "routing": routing_data,
+                                "streaming": state.streaming.model_dump()
+                            }
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to create routing metadata: {e}")
+                        # Even if metadata creation fails, preserve the target
+                        return BaseCommand(
+                            goto="research-assistant",
+                            update={
+                                "routing": state.routing.model_dump(),
+                                "streaming": state.streaming.model_dump(),
+                                "next": "research-assistant"
+                            }
+                        )
             
             # Convert decision to dict and update routing
             decision_dict = decision.model_dump()
@@ -519,8 +565,8 @@ class RouterNode:
                     update_data["streaming"] = StreamingState.model_validate(
                         update_data["streaming"]).model_dump()
                 
+                # Apply validated update data
                 state = state.model_copy(update=update_data)
-                state = state.model_copy(update=command.update)
                 logger.debug(f"Updated state: current_agent={state.routing.current_agent}, "
                            f"next={state.next}, error_count={state.routing.error_count}")
             

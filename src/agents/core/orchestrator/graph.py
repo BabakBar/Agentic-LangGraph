@@ -1,49 +1,11 @@
-"""Pure graph construction for orchestrator.
-
-This module implements a graph-based orchestrator that routes requests between different agents.
-The graph consists of several node types:
-
-- RouterNode: Makes routing decisions between agents
-- AgentExecutorNode: Executes agent actions
-- StreamingNode: Handles streaming responses
-- ErrorRecoveryNode: Handles error recovery and fallbacks
-
-Expected Agent Output Format:
-{
-    "messages": List[BaseMessage],  # List of messages including agent's response
-    "streaming": {                  # Optional streaming state
-        "is_streaming": bool,
-        "current_buffer": Optional[Dict],
-        "buffers": Dict[str, Any]
-    }
-}
-
-Test Scenarios:
-1. Valid inputs:
-   - Normal agent responses
-   - Streaming responses
-   - Error recovery paths
-2. Invalid inputs:
-   - Invalid router results
-   - Invalid agent outputs
-   - Missing or malformed data
-3. Edge cases:
-   - Empty messages
-   - Null values in streaming state
-   - Maximum error count reached
-4. Streaming scenarios:
-   - Multiple streaming buffers
-   - Stream interruption
-   - Stream completion
-"""
+"""Pure graph construction for orchestrator."""
 from datetime import datetime
-from pathlib import Path
 import asyncio
 import logging
 from typing import Dict, Optional, Any, List, Literal, cast, TypedDict
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import START
@@ -56,16 +18,10 @@ from ...common.types import (
     MaxErrorsExceeded
 )
 
-
 from ..metrics import metrics, NodeMetrics
 from .router import create_router, should_continue
 
 logger = logging.getLogger(__name__)
-
-class AgentOutput(TypedDict, total=False):
-    """Expected structure of agent outputs."""
-    messages: List[Any]  # List[BaseMessage] but Any for flexibility
-    streaming: Dict[str, Any]  # StreamingState dict structure
 
 class NodeConfig(BaseModel):
     """Configuration for graph nodes."""
@@ -104,7 +60,6 @@ class GraphNode(ABC):
         
     async def _handle_error(self, state: OrchestratorState, error: Exception) -> Dict[str, Any]:
         """Handle node execution errors."""
-        # Update routing with error
         updated_routing = state.routing.add_error(
             error=str(error),
             error_type="AgentExecutionError",
@@ -125,17 +80,7 @@ class GraphNode(ABC):
         }
 
 class RouterNode(GraphNode):
-    """Node for routing decisions.
-    
-    Expected router.route() return format:
-    BaseCommand(
-        goto=str,  # Next node or agent ID
-        update={
-            "routing": Dict,  # RoutingMetadata dict structure
-            "streaming": Dict  # StreamingState dict structure
-        }
-    )
-    """
+    """Node for routing decisions."""
     def __init__(self, router: Any, config: NodeConfig):
         super().__init__(config)
         self.router = router
@@ -146,139 +91,108 @@ class RouterNode(GraphNode):
         start_time = datetime.now()
         logger.info("Getting routing decision")
         
-        # Get routing decision
-        result = await asyncio.wait_for(
-            self.router.route(state, {}),
-            timeout=self.config.timeout_seconds
-        )
-        
-        # Record routing metrics
-        if self.config.enable_metrics and state.routing.decisions:
-            routing_time = (datetime.now() - start_time).total_seconds()
-            last_decision = state.routing.decisions[-1]
-            metrics.add_router_decision(
-                agent=last_decision.get("next", "unknown"),
-                confidence=last_decision.get("confidence", 0.0),
-                routing_time=routing_time,
-                is_fallback=state.routing.fallback_count > 0
-            )
-        logger.debug("Routing decision: %s", result)
-        logger.info("Routing decision complete")
-        
-        # Validate router result
-        if not isinstance(result, BaseCommand):
-            logger.error(f"Invalid router result type: {type(result)}")
-            # Update routing with error
-            updated_routing = state.routing.add_error(
-                error="Router must return BaseCommand",
-                error_type="RouterError",
-                details={
-                    "received_type": str(type(result)),
-                    "phase": "validation"
-                }
-            )
-            error_state = state.model_copy(update={"routing": updated_routing})
-            return {"next": "error_recovery", "state": error_state}
-            
-        if not isinstance(result.update, dict):
-            logger.error(f"Invalid router update type: {type(result.update)}")
-            # Update routing with error
-            updated_routing = state.routing.add_error(
-                error="Router update must be a dictionary",
-                error_type="RouterError",
-                details={
-                    "received_type": str(type(result.update)),
-                    "phase": "validation"
-                }
-            )
-            error_state = state.model_copy(update={"routing": updated_routing})
-            return {"next": "error_recovery", "state": error_state}
-            
-        # Create new state from router result
         try:
-            routing_data = result.update.get("routing", {})
-            streaming_data = result.update.get("streaming", {})
+            # Get routing decision
+            result = await asyncio.wait_for(
+                self.router.route(state, {}),
+                timeout=self.config.timeout_seconds
+            )
             
-            # Validate routing data structure
-            if not isinstance(routing_data, dict):
-                logger.warning("Invalid routing data, using current state")
-                routing_data = state.routing.model_dump()
-            else:
-                required_fields = {"current_agent", "decisions", "error_count"}
-                missing_fields = required_fields - set(routing_data.keys())
-                if missing_fields:
-                    logger.warning(f"Missing routing fields: {missing_fields}")
+            # Record routing metrics
+            if self.config.enable_metrics and state.routing.decisions:
+                routing_time = (datetime.now() - start_time).total_seconds()
+                last_decision = state.routing.decisions[-1]
+                metrics.add_router_decision(
+                    agent=last_decision.get("next", "unknown"),
+                    confidence=last_decision.get("confidence", 0.0),
+                    routing_time=routing_time,
+                    is_fallback=state.routing.fallback_count > 0
+                )
+            
+            logger.debug("Routing decision: %s", result)
+            logger.info("Routing decision complete")
+            
+            try:
+                # Extract and preserve intended target
+                intended_target = result.goto
+                routing_data = result.update.get("routing", {})
+                streaming_data = result.update.get("streaming", {})
+                
+                logger.debug("Processing router result", extra={
+                    "goto": intended_target,
+                    "routing_data": routing_data
+                })
+
+                # Ensure routing data has required fields
+                if not isinstance(routing_data, dict):
                     routing_data = state.routing.model_dump()
+                routing_data["current_agent"] = intended_target
                 
-            # Validate streaming data structure
-            if not isinstance(streaming_data, dict):
-                logger.warning("Invalid streaming data, using current state")
-                streaming_data = state.streaming.model_dump()
-            else:
-                required_fields = {"is_streaming", "buffers"}
-                missing_fields = required_fields - set(streaming_data.keys())
-                if missing_fields:
-                    logger.warning(f"Missing streaming fields: {missing_fields}")
-                    streaming_data = state.streaming.model_dump()
-                
-            # Handle streaming state transition
-            if state.streaming.is_streaming and not streaming_data.get("is_streaming", False):
-                # Clean up streaming state when transitioning from streaming to non-streaming
-                streaming_data = {
-                    "is_streaming": False,
-                    "current_buffer": None,
-                    "buffers": {}
+                # Create state data with preserved target
+                state_data = {
+                    "messages": state.messages,
+                    "next": intended_target,
+                    "routing": routing_data,
+                    "streaming": streaming_data or state.streaming.model_dump(),
+                    "tool_state": state.tool_state,
+                    "agent_ids": state.agent_ids,
+                    "next_agent": intended_target,
+                    "schema_version": state.schema_version
                 }
                 
-            updated_state = OrchestratorState(
-                messages=state.messages,
-                next=result.goto,
-                routing=RoutingMetadata(**routing_data),
-                streaming=StreamingState(**streaming_data),
-                tool_state=state.tool_state,
-                agent_ids=state.agent_ids,
-                next_agent=result.goto,
-                schema_version=state.schema_version
-            )
-            
-            return {
-                "next": result.goto,
-                "state": updated_state
-            }
+                logger.debug("Creating state with data", extra={"state_data": state_data})
+                
+                # Use direct model validation
+                updated_state = OrchestratorState.model_validate(state_data)
+                
+                logger.debug("State update complete", extra={
+                    "next": updated_state.next,
+                    "current_agent": updated_state.routing.current_agent
+                })
+                
+                return {
+                    "next": intended_target,
+                    "state": updated_state
+                }
+                
+            except Exception as e:
+                logger.error(f"State validation error: {e}", extra={
+                    "error": str(e),
+                    "intended_target": intended_target
+                })
+                # Create error state but preserve intended target
+                error_state = state.add_error(
+                    str(e),
+                    "ValidationError",
+                    intended_target,
+                    {"phase": "state_validation"}
+                )
+                return {
+                    "next": intended_target,  # Still try to route to intended target
+                    "state": error_state
+                }
+                
         except Exception as e:
-            logger.error(f"Error creating state from router result: {str(e)}")
-            # Update routing with error
-            updated_routing = state.routing.add_error(
-                error=str(e),
-                error_type="RouterError",
-                details={"phase": "state_creation"}
+            logger.error(f"Router execution error: {e}")
+            error_state = state.add_error(
+                str(e),
+                "RouterError",
+                None,
+                {"phase": "execution"}
             )
-            error_state = state.model_copy(update={"routing": updated_routing})
             return {
                 "next": "error_recovery",
                 "state": error_state
             }
 
 class AgentExecutorNode(GraphNode):
-    """Node for executing agent actions.
-    
-    Expected agent.ainvoke() return format:
-    {
-        "messages": List[BaseMessage],  # List of messages including agent's response
-        "streaming": {                  # Optional streaming state
-            "is_streaming": bool,
-            "current_buffer": Optional[Dict],
-            "buffers": Dict[str, Any]
-        }
-    }
-    """
+    """Node for executing agent actions."""
     def __init__(self, agents: Dict[str, AgentLike], config: NodeConfig):
         super().__init__(config)
         self.agents = agents
         
     async def _execute(self, state: OrchestratorState) -> Dict[str, Any]:
         """Execute selected agent."""
-        # Use routing.current_agent if available; otherwise use state.next
         current_agent_name = state.routing.current_agent or state.next
         logger.info(f"AgentExecutorNode executing with agent: {current_agent_name}")
         
@@ -306,12 +220,13 @@ class AgentExecutorNode(GraphNode):
                     error_type="AgentNotFoundError",
                     agent=current_agent_name
                 )
+                error_state = state.model_copy(update={"routing": updated_routing})
                 return {
-                "next": "error_recovery",
-                "state": error_state
-            }
+                    "next": "error_recovery",
+                    "state": error_state
+                }
 
-        agent = self.agents.get(current_agent_name)
+        agent = self.agents[current_agent_name]
         logger.info(f"Found agent {current_agent_name}, executing...")
         
         # Ensure state has proper routing information
@@ -328,7 +243,7 @@ class AgentExecutorNode(GraphNode):
                 asyncio.shield(agent.ainvoke(state)),
                 timeout=self.config.timeout_seconds
             )
-            logger.info(f"Agent {current_agent_name} execution completed with result: {result.get('next', 'unknown')}")
+            logger.info(f"Agent {current_agent_name} execution completed")
             
             # Validate agent result
             if not isinstance(result, dict):
@@ -351,6 +266,7 @@ class AgentExecutorNode(GraphNode):
             # Return result with preserved routing
             result["state"] = result.get("state", state)
             return result
+            
         except asyncio.TimeoutError:
             logger.warning("Agent execution timed out")
             return {
@@ -392,7 +308,6 @@ class StreamingNode(GraphNode):
             )
             logger.info("Cleaned up streaming state")
             
-            logger.info("No active stream, routing to next node")
             return {
                 "next": "router",
                 "state": updated_state
