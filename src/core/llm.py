@@ -2,7 +2,6 @@ from functools import cache
 from typing import TypeAlias
 
 from langchain_anthropic import ChatAnthropic
-from langchain_aws import ChatBedrock
 from langchain_community.chat_models import FakeListChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
@@ -35,7 +34,7 @@ _MODEL_TABLE = {
     FakeModelName.FAKE: "fake",
 }
 
-ModelT: TypeAlias = ChatOpenAI | ChatAnthropic | ChatGoogleGenerativeAI | ChatGroq | ChatBedrock
+ModelT: TypeAlias = ChatOpenAI | ChatAnthropic | ChatGoogleGenerativeAI | ChatGroq
 
 
 @cache
@@ -47,7 +46,11 @@ def get_model(model_name: AllModelEnum, /) -> ModelT:
         raise ValueError(f"Unsupported model: {model_name}")
 
     if model_name in OpenAIModelName:
-        return ChatOpenAI(model=api_model_name, temperature=0.5, streaming=True)
+        return ChatOpenAI(
+            model=api_model_name,
+            temperature=0.5,
+            streaming=True,
+        )
     if model_name in DeepseekModelName:
         return ChatOpenAI(
             model=api_model_name,
@@ -57,12 +60,14 @@ def get_model(model_name: AllModelEnum, /) -> ModelT:
             openai_api_key=settings.DEEPSEEK_API_KEY,
         )
     if model_name in AnthropicModelName:
-        return ChatAnthropic(model=api_model_name, temperature=0.5, streaming=True)
+        return ChatAnthropic(
+            model=api_model_name,
+            temperature=0.5,
+            streaming=True,
+        )
     if model_name in GoogleModelName:
         return ChatGoogleGenerativeAI(model=api_model_name, temperature=0.5, streaming=True)
     if model_name in GroqModelName:
         return ChatGroq(model=api_model_name, temperature=0.5)
-    if model_name in AWSModelName:
-        return ChatBedrock(model_id=api_model_name, temperature=0.5)
     if model_name in FakeModelName:
         return FakeListChatModel(responses=["This is a test response from the fake model."])

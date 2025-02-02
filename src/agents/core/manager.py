@@ -33,19 +33,21 @@ class GraphAgent:
         return self._graph
 
     async def ainvoke(self, state: dict[str, Any]) -> dict[str, Any]:
-        if "routing" in state:
-            # This is an orchestrator state, pass it through
-            return await self._graph.ainvoke(state)
-        else:
-            # This is a base agent state, convert to expected format
-            agent_state = {
-                "messages": state.get("messages", []),
-                "configurable": state.get("config", {}).get("configurable", {}),
-                "routing": {"current_agent": None},
-                "streaming": {"is_streaming": False},
-                "tool_state": {}
-            }
-            return await self._graph.ainvoke(agent_state)
+        # Convert Pydantic model to dict if needed
+        if hasattr(state, "model_dump"):
+            state = state.model_dump()
+
+        # Convert to format expected by base agents
+        agent_state = {
+            "messages": state.get("messages", []),
+            "input": {"messages": state.get("messages", [])},  # Required by some agents
+            "configurable": state.get("config", {}).get("configurable", {}),
+            "routing": state.get("routing", {"current_agent": None}),
+            "streaming": state.get("streaming", {"is_streaming": False}),
+            "tool_state": state.get("tool_state", {}),
+            "schema_version": state.get("schema_version", "2.0")
+        }
+        return await self._graph.ainvoke(agent_state)
 
 # Initialize registries
 _registry = AgentRegistry()

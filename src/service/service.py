@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 import os
 import warnings
@@ -95,13 +96,20 @@ def _parse_input(user_input: UserInput) -> tuple[dict[str, Any], UUID]:
     run_id = uuid4()
     thread_id = user_input.thread_id or str(uuid4())
     
+    # Get list of available agent IDs from registered agents
+    agent_ids = [agent.key for agent in get_all_agent_info()]
+    
     # Create initial state with all required fields
     initial_state = {
         "messages": [HumanMessage(content=user_input.message)],
-        "routing": {"current_agent": None, "decision_history": [], "fallback_used": False, "errors": []},
+        "routing": {
+            "current_agent": None,  # Let router decide initial agent
+            "decisions": [],
+            "error_count": 0,
+            "errors": []
+        },
         "streaming": {"is_streaming": False, "current_buffer": None, "buffers": {}},
-        "tool_state": {"tool_states": {}, "last_update": None},
-        "agent_ids": [],
+        "agent_ids": agent_ids,  # Include available agent IDs
         "next_agent": None,
         "schema_version": "2.0"
     }
@@ -148,50 +156,78 @@ async def message_generator(
 
     # Process streamed events from the graph and yield messages over the SSE stream.
     logger.debug(f"Starting stream for agent {agent_id} with kwargs: {kwargs}")
-    async for event in agent.astream_events(**kwargs, version="v2"):
-        logger.debug(f"Received event: {event}")
-        if not event:
-            continue
-
-        new_messages = []
-        # Yield messages written to the graph state after node execution finishes.
-        if (
-            event["event"] == "on_chain_end"
-            # on_chain_end gets called a bunch of times in a graph execution
-            # This filters out everything except for "graph node finished"
-            and any(t.startswith("graph:step:") for t in event.get("tags", []))
-            and "messages" in event["data"]["output"]
-        ):
-            logger.debug("Processing chain end event with messages")
-            new_messages = event["data"]["output"]["messages"]
-
-        # Also yield intermediate messages from agents.utils.CustomData.adispatch().
-        if event["event"] == "on_custom_event" and "custom_data_dispatch" in event.get("tags", []):
-            new_messages = [event["data"]]
-
-        for message in new_messages:
-            try:
-                chat_message = langchain_to_chat_message(message)
-                chat_message.run_id = str(run_id)
-            except Exception as e:
-                logger.error(f"Error parsing message: {e}")
-                yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
+    
+    try:
+        async for event in agent.astream_events(**kwargs, version="v2"):
+            logger.debug(f"Received event: {event}")
+            if not event:
                 continue
-            # LangGraph re-sends the input message, which feels weird, so drop it
-            if chat_message.type == "human" and chat_message.content == user_input.message:
-                continue
-            yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()})}\n\n"
 
-        # Yield tokens streamed from LLMs.
-        if event["event"] == "on_chat_model_stream" and user_input.stream_tokens:
-            logger.debug("Processing chat model stream event")
-            content = remove_tool_calls(event["data"]["chunk"].content)
-            if content:
-                # Empty content in the context of OpenAI usually means
-                # that the model is asking for a tool to be invoked.
-                # So we only print non-empty content.
-                yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
-            continue
+            new_messages = []
+            # Yield messages written to the graph state after node execution finishes.
+            if (
+                event["event"] == "on_chain_end"
+                # on_chain_end gets called a bunch of times in a graph execution
+                # This filters out everything except for "graph node finished"
+                and any(t.startswith("graph:step:") for t in event.get("tags", []))
+            ):
+                logger.debug("Processing chain end event with messages")
+                output = event["data"]["output"]
+                
+                # Handle Command objects
+                if hasattr(output, "update") and isinstance(output.update, dict):
+                    if "messages" in output.update:
+                        new_messages = output.update["messages"]
+                # Handle direct message updates
+                elif isinstance(output, dict) and "messages" in output:
+                    new_messages = output["messages"]
+                else:
+                    logger.debug(f"Skipping event with unhandled output type: {type(output)}")
+
+            # Also yield intermediate messages from agents.utils.CustomData.adispatch().
+            if event["event"] == "on_custom_event" and "custom_data_dispatch" in event.get("tags", []):
+                new_messages = [event["data"]]
+
+            for message in new_messages:
+                try:
+                    chat_message = langchain_to_chat_message(message)
+                    chat_message.run_id = str(run_id)
+                except Exception as e:
+                    logger.error(f"Error parsing message: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
+                    continue
+                # LangGraph re-sends the input message, which feels weird, so drop it
+                if chat_message.type == "human" and chat_message.content == user_input.message:
+                    continue
+                yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()})}\n\n"
+
+            # Yield tokens streamed from LLMs.
+            if event["event"] == "on_chat_model_stream" and user_input.stream_tokens:
+                logger.debug("Processing chat model stream event")
+                content = remove_tool_calls(event["data"]["chunk"].content)
+                if content:
+                    # Empty content in the context of OpenAI usually means
+                    # that the model is asking for a tool to be invoked.
+                    # So we only print non-empty content.
+                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
+                continue
+
+    except asyncio.CancelledError:
+        logger.info("Stream cancelled by client")
+        try:
+            # Send a final message to client
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Stream cancelled'})}\n\n"
+        except Exception:
+            # If we can't send the status message, just return silently
+            pass
+        finally:
+            # Ensure we always return to break the stream
+            return
+            
+    except Exception as e:
+        logger.error(f"Error in message stream: {str(e)}")
+        yield f"data: {json.dumps({'type': 'error', 'content': 'Stream error occurred'})}\n\n"
+        return
 
     logger.debug("Stream completed")
     yield "data: [DONE]\n\n"

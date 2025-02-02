@@ -1,8 +1,35 @@
 """Core types for agent system using Pydantic models."""
+
+class AgentError(Exception):
+    """Base class for agent-related errors."""
+    pass
+
+class AgentNotFoundError(AgentError):
+    """Raised when an agent is not found in the registry."""
+    pass
+
+class AgentExecutionError(AgentError):
+    """Raised when an agent fails during execution."""
+    pass
+
+class RouterError(AgentError):
+    """Raised when routing fails."""
+    pass
+
+class MaxErrorsExceeded(AgentError):
+    """Raised when max errors threshold is exceeded."""
+    pass
+
 from datetime import datetime
-from typing import Protocol, runtime_checkable, Any, Set, Optional, List, Dict
+from typing import Protocol, runtime_checkable, Any, Set, Optional, List, Dict, Annotated, Self
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from langchain_core.messages import BaseMessage
+from langgraph.types import Command as BaseCommand
+import operator
+
+def update_dict(old: dict, new: dict) -> dict:
+    """Merge two dictionaries, new values override old ones."""
+    return {**old, **new} if old and new else new or old or {}
 
 class AgentError(Exception):
     """Base class for agent-related errors."""
@@ -16,8 +43,15 @@ class RegistrationError(AgentError):
     """Raised for agent registration issues."""
     pass
 
-class RoutingError(AgentError):
-    """Raised for routing-related issues."""
+class RoutingError(BaseModel):
+    """Structured routing error information."""
+    timestamp: datetime
+    error: str
+    input: str
+    agent: Optional[str] = None
+
+class MaxErrorsExceeded(AgentError):
+    """Raised when maximum number of retries is exceeded."""
     pass
 
 @runtime_checkable
@@ -43,22 +77,48 @@ class RouterDecision(BaseModel):
     next: str
     confidence: float = Field(ge=0.0, le=1.0, default=0.9)
     reasoning: Optional[str] = None
-    alternatives: List[str] = Field(default_factory=list)
-
-class RoutingError(BaseModel):
-    """Structured routing error information."""
-    timestamp: datetime
-    error: str
-    input: str
-    agent: Optional[str] = None
+    capabilities_matched: List[str] = Field(default_factory=list)
+    fallback_agents: List[str] = Field(default_factory=list)
 
 class RoutingMetadata(BaseModel):
     """Mutable routing state information."""
     current_agent: Optional[str] = None
-    decision_history: List[RouterDecision] = Field(default_factory=list)
-    fallback_used: bool = False
+    decisions: List[Dict[str, Any]] = Field(default_factory=list)
     errors: List[RoutingError] = Field(default_factory=list)
-
+    fallback_count: int = 0
+    error_count: int = 0
+    start_time: datetime = Field(default_factory=datetime.utcnow)
+    
+    def add_decision(self, decision: Dict[str, Any]) -> Self:
+        """Add a routing decision and return new instance."""
+        return RoutingMetadata(
+            current_agent=decision.get("next"),
+            decisions=self.decisions + [decision],
+            errors=self.errors,
+            fallback_count=self.fallback_count,
+            error_count=self.error_count,
+            start_time=self.start_time
+        )
+        
+    def add_error(self, error: str, error_type: str, agent: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> Self:
+        """Add an error, increment error count, and return new instance."""
+        new_error = RoutingError(
+            timestamp=datetime.now(),
+            error=error,
+            input=error_type,  # Using input field to store error_type for compatibility
+            agent=agent
+        )
+        
+        new_error_count = self.error_count + 1
+        
+        return RoutingMetadata(
+            current_agent=self.current_agent,
+            decisions=self.decisions,
+            errors=self.errors + [new_error],
+            fallback_count=self.fallback_count,
+            error_count=new_error_count,
+            start_time=self.start_time
+        )
 class ValidatedRouterOutput(RouterDecision):
     """Validated routing output with registry awareness."""
     @model_validator(mode="after")
@@ -74,23 +134,27 @@ class StreamBuffer(BaseModel):
     error: Optional[str] = None
     agent_id: Optional[str] = None
     
-    def add_token(self, token: str) -> None:
-        """Add a token to the buffer."""
-        self.content.append(token)
+    def add_token(self, token: str) -> Self:
+        """Add a token to the buffer and return new instance."""
+        return StreamBuffer(
+            content=self.content + [token],
+            is_complete=self.is_complete,
+            error=self.error,
+            agent_id=self.agent_id
+        )
     
     def get_content(self) -> str:
         """Get complete buffered content."""
         return "".join(self.content)
     
-    def mark_complete(self) -> None:
-        """Mark the buffer as complete."""
-        self.is_complete = True
-    
-    def clear(self) -> None:
-        """Clear the buffer."""
-        self.content = []
-        self.is_complete = False
-        self.error = None
+    def mark_complete(self) -> Self:
+        """Mark the buffer as complete and return new instance."""
+        return StreamBuffer(
+            content=self.content,
+            is_complete=True,
+            error=self.error,
+            agent_id=self.agent_id
+        )
 
 class StreamingState(BaseModel):
     """Manages streaming state across agents."""
@@ -98,55 +162,94 @@ class StreamingState(BaseModel):
     current_buffer: Optional[StreamBuffer] = None
     buffers: Dict[str, StreamBuffer] = Field(default_factory=dict)
     
-    def start_stream(self, agent_id: str) -> None:
-        """Start streaming for an agent."""
-        self.is_streaming = True
-        self.current_buffer = StreamBuffer(agent_id=agent_id)
-        self.buffers[agent_id] = self.current_buffer
+    def start_stream(self, agent_id: str) -> Self:
+        """Start streaming for an agent and return new instance."""
+        new_buffer = StreamBuffer(agent_id=agent_id)
+        new_buffers = dict(self.buffers)
+        new_buffers[agent_id] = new_buffer
+        return StreamingState(
+            is_streaming=True,
+            current_buffer=new_buffer,
+            buffers=new_buffers
+        )
     
-    def end_stream(self) -> None:
-        """End current stream."""
+    def end_stream(self) -> Self:
+        """End current stream and return new instance."""
+        new_buffers = dict(self.buffers)
         if self.current_buffer:
-            self.current_buffer.mark_complete()
-        self.is_streaming = False
-        self.current_buffer = None
+            new_buffers[self.current_buffer.agent_id] = self.current_buffer.mark_complete()
+        return StreamingState(
+            is_streaming=False,
+            current_buffer=None,
+            buffers=new_buffers
+        )
     
-    def add_token(self, token: str) -> None:
-        """Add token to current buffer."""
-        if self.current_buffer:
-            self.current_buffer.add_token(token)
+    def add_token(self, token: str) -> Self:
+        """Add token to current buffer and return new instance."""
+        if not self.current_buffer:
+            return self
+        new_buffer = self.current_buffer.add_token(token)
+        new_buffers = dict(self.buffers)
+        new_buffers[new_buffer.agent_id] = new_buffer
+        return StreamingState(
+            is_streaming=self.is_streaming,
+            current_buffer=new_buffer,
+            buffers=new_buffers
+        )
     
-    def set_error(self, error: str) -> None:
-        """Set error on current buffer."""
-        if self.current_buffer:
-            self.current_buffer.error = error
-            self.end_stream()
+    def set_error(self, error: str) -> Self:
+        """Set error on current buffer and return new instance."""
+        if not self.current_buffer:
+            return self
+        new_buffer = StreamBuffer(
+            content=self.current_buffer.content,
+            is_complete=True,
+            error=error,
+            agent_id=self.current_buffer.agent_id
+        )
+        new_buffers = dict(self.buffers)
+        new_buffers[new_buffer.agent_id] = new_buffer
+        return StreamingState(
+            is_streaming=False,
+            current_buffer=None,
+            buffers=new_buffers
+        )
 
 class ToolState(BaseModel):
     """State management for tool execution."""
     tool_states: Dict[str, Any] = Field(default_factory=dict)
     last_update: Optional[datetime] = None
     
-    def update(self, tool_id: str, state: Any) -> "ToolState":
-        """Update state for a specific tool."""
-        self.tool_states[tool_id] = state
-        self.last_update = datetime.now()
-        return self
+    def update(self, tool_id: str, state: Any) -> Self:
+        """Update state for a specific tool and return new instance."""
+        new_states = dict(self.tool_states)
+        new_states[tool_id] = state
+        return ToolState(
+            tool_states=new_states,
+            last_update=datetime.now()
+        )
 
     def get(self, tool_id: str, default: Any = None) -> Any:
         """Get state for a specific tool."""
         return self.tool_states.get(tool_id, default)
 
-    def clear(self, tool_id: str) -> None:
-        """Clear state for a specific tool."""
-        if tool_id in self.tool_states:
-            del self.tool_states[tool_id]
-            self.last_update = datetime.now()
+    def clear(self, tool_id: str) -> Self:
+        """Clear state for a specific tool and return new instance."""
+        new_states = dict(self.tool_states)
+        if tool_id in new_states:
+            del new_states[tool_id]
+        return ToolState(
+            tool_states=new_states,
+            last_update=datetime.now()
+        )
 
 class OrchestratorState(BaseModel):
     """Serializable state for orchestrator with immutable core."""
     # Immutable conversation history
     messages: List[BaseMessage] = Field(..., frozen=True)
+
+    # Command state
+    next: Optional[str] = None
     
     # Mutable routing state
     routing: RoutingMetadata = Field(default_factory=RoutingMetadata)
@@ -154,8 +257,8 @@ class OrchestratorState(BaseModel):
     # Streaming state management
     streaming: StreamingState = Field(default_factory=StreamingState)
 
-    # Tool state management
-    tool_state: ToolState = Field(default_factory=ToolState)
+    # Tool state management with reducer
+    tool_state: Annotated[Dict[str, Any], update_dict] = Field(default_factory=dict)
     
     # Backward compatibility
     agent_ids: List[str] = Field(default_factory=list)
@@ -176,55 +279,110 @@ class OrchestratorState(BaseModel):
         }
     )
     
-    def update_routing(self, decision: RouterDecision) -> "OrchestratorState":
+    def update_routing(self, decision: Dict[str, Any]) -> Self:
         """Update routing state with new decision."""
-        self.routing.current_agent = decision.next
-        self.routing.decision_history.append(decision)
-        self.next_agent = decision.next  # For backward compatibility
-        return self
-    
-    def add_error(self, error: str, input_text: str, agent: Optional[str] = None) -> "OrchestratorState":
-        """Add routing error to state."""
-        self.routing.errors.append(
-            RoutingError(
-                timestamp=datetime.now(),
-                error=error,
-                input=input_text,
-                agent=agent
-            )
+        return OrchestratorState(
+            messages=self.messages,
+            next=decision.get("next"),
+            routing=self.routing.add_decision(decision),
+            streaming=self.streaming,
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=decision.get("next"),
+            schema_version=self.schema_version
         )
-        return self
+    
+    def add_error(self, error: str, input_text: str, agent: Optional[str] = None) -> Self:
+        """Add routing error to state."""
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing.add_error(error, input_text, agent),
+            streaming=self.streaming,
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
-    def update_tool_state(self, tool_id: str, state: Any) -> "OrchestratorState":
+    def update_tool_state(self, tool_id: str, state: Any) -> Self:
         """Update state for a specific tool."""
-        self.tool_state.update(tool_id, state)
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming,
+            tool_state=self.tool_state.update(tool_id, state),
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
     def get_tool_state(self, tool_id: str, default: Any = None) -> Any:
         """Get state for a specific tool."""
         return self.tool_state.get(tool_id, default)
 
-    def clear_tool_state(self, tool_id: str) -> "OrchestratorState":
+    def clear_tool_state(self, tool_id: str) -> Self:
         """Clear state for a specific tool."""
-        self.tool_state.clear(tool_id)
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming,
+            tool_state=self.tool_state.clear(tool_id),
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
-    def start_stream(self, agent_id: str) -> "OrchestratorState":
+    def start_stream(self, agent_id: str) -> Self:
         """Start streaming for an agent."""
-        self.streaming.start_stream(agent_id)
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming.start_stream(agent_id),
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
-    def end_stream(self) -> "OrchestratorState":
+    def end_stream(self) -> Self:
         """End current stream."""
-        self.streaming.end_stream()
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming.end_stream(),
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
-    def add_token(self, token: str) -> "OrchestratorState":
+    def add_token(self, token: str) -> Self:
         """Add token to current stream."""
-        self.streaming.add_token(token)
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming.add_token(token),
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
 
-    def set_stream_error(self, error: str) -> "OrchestratorState":
+    def set_stream_error(self, error: str) -> Self:
         """Set error on current stream."""
-        self.streaming.set_error(error)
-        return self
+        return OrchestratorState(
+            messages=self.messages,
+            next=self.next,
+            routing=self.routing,
+            streaming=self.streaming.set_error(error),
+            tool_state=self.tool_state,
+            agent_ids=self.agent_ids,
+            next_agent=self.next_agent,
+            schema_version=self.schema_version
+        )
