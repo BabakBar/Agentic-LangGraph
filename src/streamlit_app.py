@@ -178,27 +178,35 @@ async def main() -> None:
 async def draw_messages(messages_agen, is_new=False):
     """Draw messages from the async generator."""
     try:
-        placeholder = st.empty()
-        message_history = []
+        placeholder = st.empty() 
+        current_content = ""
         
         async for msg in messages_agen:
             try:
                 # Handle both dict and ChatMessage types
                 msg_type = msg.type if isinstance(msg, ChatMessage) else msg.get("type")
-                msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content")
+                msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content", "")
                 
                 if msg_type == "error":
                     st.error(f"Error: {msg_content}")
                     continue
                     
                 # Handle other message types
-                if msg_type in ["message", "token"]:
-                    message_history.append(msg)
+                if msg_type in ["message", "token", "ai"]:
+                    # Extract content from structured messages
+                    if isinstance(msg_content, dict) and "content" in msg_content:
+                        msg_content = msg_content["content"]
+                    elif isinstance(msg_content, dict) and "text" in msg_content:
+                        msg_content = msg_content["text"]
+                    
+                    # Append new content
+                    if msg_content:
+                        current_content += str(msg_content)
+                    
                     # Update display
                     with placeholder.container():
-                        for m in message_history:
-                            st.write(m.content if isinstance(m, ChatMessage) else m["content"])
-                
+                        st.markdown(current_content)
+                        
                 # Allow other tasks to run
                 await asyncio.sleep(0)
                         
