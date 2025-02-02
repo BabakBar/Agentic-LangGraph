@@ -1,12 +1,25 @@
-.git
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+
+# Development
+.git/
 .gitignore
 .env
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env
-venv
-.venv
-*.db
+.venv/
+*.log
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build
+*.egg-info/
+dist/
+build/
