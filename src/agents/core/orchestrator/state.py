@@ -1,37 +1,72 @@
 """State management for the orchestrator agent."""
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Literal
+import logging
+from typing import Dict, Any, Optional, List, Literal, Annotated
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 from langchain_core.messages import BaseMessage
+from ...common.types import (
+    AgentError, AgentNotFoundError, AgentExecutionError,
+    RouterError, MaxErrorsExceeded
+)
 
 # Constants
 MAX_ERRORS = 3
 CURRENT_VERSION = "2.0"
 
-class MaxErrorsExceeded(Exception):
-    """Raised when max errors threshold is exceeded."""
-    pass
+logger = logging.getLogger(__name__)
+
+class ErrorState(BaseModel):
+    """Track error information."""
+    message: str
+    error_type: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    agent: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    is_fatal: bool = False
 
 class RoutingMetadata(BaseModel):
     """Track routing decisions and performance."""
     current_agent: Optional[str] = None
     decisions: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: List[ErrorState] = Field(default_factory=list)
     fallback_count: int = 0
     error_count: int = 0
     start_time: datetime = Field(default_factory=datetime.utcnow)
     
-    def add_decision(self, decision: Dict[str, Any]) -> None:
-        """Add a routing decision."""
-        self.decisions.append(decision)
-        self.current_agent = decision["next_agent"]
+    def add_decision(self, decision: Dict[str, Any]) -> "RoutingMetadata":
+        """Add a routing decision and return new instance."""
+        return RoutingMetadata(
+            current_agent=decision.get("next"),
+            decisions=self.decisions + [decision],
+            errors=self.errors,
+            error_count=self.error_count,
+            fallback_count=self.fallback_count,
+            start_time=self.start_time
+        )
+
+    def add_error(self, error: str, error_type: str, agent: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> "RoutingMetadata":
+        """Add an error and return new instance."""
+        new_error = ErrorState(
+            message=error,
+            error_type=error_type,
+            agent=agent,
+            details=details
+        )
         
-    def add_error(self, error: str) -> None:
-        """Add an error and check threshold."""
-        self.error_count += 1
-        if self.error_count > MAX_ERRORS:
-            raise MaxErrorsExceeded()
+        # Increment error count
+        new_error_count = self.error_count + 1
+        
+        # Create a new instance of RoutingMetadata with the updated error count and errors
+        return RoutingMetadata(
+            current_agent=self.current_agent,
+            decisions=self.decisions,
+            errors=self.errors + [new_error],
+            error_count=new_error_count,
+            fallback_count=self.fallback_count,
+            start_time=self.start_time
+        )
 
 class StreamBuffer(BaseModel):
     """Manage streaming tokens."""
@@ -68,7 +103,7 @@ class StreamingState(BaseModel):
     def end_stream(self) -> None:
         """End current stream."""
         if self.current_buffer:
-            self.current_buffer.mark_complete()
+            self.current_buffer.is_complete = True
         self.is_streaming = False
         self.current_buffer = None
 
@@ -107,13 +142,16 @@ class ToolState(BaseModel):
 
 class OrchestratorState(BaseModel):
     """Complete orchestrator state."""
-    # Core state (immutable)
-    messages: List[BaseMessage] = Field(..., frozen=True)
+    # Core state
+    messages: List[BaseMessage] = Field(...)
+
+    # Command state
+    next: Optional[str] = None
     
     # Component states
     routing: RoutingMetadata = Field(default_factory=RoutingMetadata)
     streaming: StreamingState = Field(default_factory=StreamingState)
-    tools: ToolState = Field(default_factory=ToolState)
+    tools: Dict[str, Any] = Field(default_factory=dict)
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -132,54 +170,75 @@ class OrchestratorState(BaseModel):
             if not self.routing.decisions:
                 raise ValueError("Current agent set without routing decision")
             last_decision = self.routing.decisions[-1]
-            if last_decision["next_agent"] != self.routing.current_agent:
+            if last_decision["next"] != self.routing.current_agent:
                 raise ValueError("Current agent doesn't match last decision")
                 
         # Validate streaming state
         if self.streaming.is_streaming:
             if not self.streaming.current_buffer:
                 raise ValueError("Streaming active but no current buffer")
-            if self.routing.current_agent not in self.streaming.buffers:
+            if self.routing.current_agent and self.routing.current_agent not in self.streaming.buffers:
                 raise ValueError("No buffer for current streaming agent")
                 
         # Validate tool state
-        if any(tool.end_time is None for tool in self.tools.completed_tools):
-            raise ValueError("Found completed tool without end time")
+        if self.tools and not isinstance(self.tools, dict):
+            raise ValueError("Tool state must be a dictionary")
             
         return self
     
+    def add_error(self, error: str, error_type: str, agent: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> "OrchestratorState":
+        """Add error and return new state."""
+        # Update routing with error
+        new_routing = self.routing.add_error(error, error_type, agent, details)
+        
+        return OrchestratorState(
+            messages=self.messages,
+            next="error_recovery",  # Route to error recovery
+            routing=new_routing,
+            streaming=self.streaming,
+            tools=self.tools,
+            agent_ids=self.agent_ids,
+            next_agent=None,  # Clear current agent during error
+            schema_version=self.schema_version,
+            created_at=self.created_at,
+            updated_at=datetime.utcnow()
+        )
+    
     def update_routing(self, decision: Dict[str, Any]) -> "OrchestratorState":
         """Update routing state."""
-        self.routing.add_decision(decision)
-        self.next_agent = decision["next_agent"]  # For backward compatibility
-        self.updated_at = datetime.utcnow()
-        return self
+        # Create new RoutingMetadata instance with updated values
+        new_routing = self.routing.add_decision(decision)
         
-    def update_streaming(self, token: str) -> "OrchestratorState":
-        """Update streaming state."""
-        if not self.streaming.is_streaming:
-            self.streaming.start_stream(self.routing.current_agent)
-        self.streaming.current_buffer.add_token(token)
-        self.updated_at = datetime.utcnow()
-        return self
-        
-    def start_tool(self, tool_name: str) -> tuple["OrchestratorState", str]:
-        """Start tool execution."""
-        execution_id = self.tools.start_tool(tool_name)
-        self.updated_at = datetime.utcnow()
-        return self, execution_id
-        
-    def complete_tool(self, execution_id: str, result: Any) -> "OrchestratorState":
-        """Complete tool execution."""
-        self.tools.complete_tool(execution_id, result)
-        self.updated_at = datetime.utcnow()
-        return self
+        # Create new state instance with updated routing
+        return OrchestratorState(
+            messages=self.messages,
+            next=decision.get("next"),  # Update Command state
+            routing=new_routing,
+            streaming=self.streaming,
+            tools=self.tools,
+            agent_ids=self.agent_ids,
+            next_agent=decision.get("next"),
+            schema_version=self.schema_version,
+            created_at=self.created_at,
+            updated_at=datetime.utcnow()
+        )
 
 def create_initial_state(messages: list[BaseMessage]) -> OrchestratorState:
     """Create initial state for orchestrator."""
+    logger.debug(f"Creating initial state with messages: {messages}")
     return OrchestratorState(
         messages=messages,
-        schema_version=CURRENT_VERSION
+        routing=RoutingMetadata(
+            next=None,
+            current_agent=None,
+            decisions=[]
+        ),
+        streaming=StreamingState(
+            is_streaming=False,
+            buffers={}
+        ),
+        tools={},
+        schema_version=CURRENT_VERSION,
     )
 
 def migrate_state(state: Dict[str, Any], target_version: str = CURRENT_VERSION) -> OrchestratorState:
@@ -194,11 +253,12 @@ def migrate_state(state: Dict[str, Any], target_version: str = CURRENT_VERSION) 
         return OrchestratorState(
             messages=state["messages"],
             routing=RoutingMetadata(
-                current_agent=state.get("next_agent"),
+                next=state.get("next"),
+                current_agent=state.get("next"),
                 decisions=[]
             ),
             streaming=StreamingState(),
-            tools=ToolState(),
+            tools={},
             schema_version="2.0"
         )
         
