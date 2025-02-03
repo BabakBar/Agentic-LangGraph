@@ -45,9 +45,10 @@ logger = logging.getLogger(__name__)
 # Set up logging with environment LOG_LEVEL
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 
-# Ensure data directory exists
-os.makedirs("/app/data", exist_ok=True)
-DB_PATH = "/app/data/checkpoints.db"
+# Configure data directory with environment variable or default to relative path
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "checkpoints.db")
 
 def verify_bearer(
     http_auth: Annotated[

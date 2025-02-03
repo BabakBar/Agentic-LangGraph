@@ -56,7 +56,7 @@ You can run the application either locally or using Docker. Both methods provide
 
 ### Prerequisites
 
-- Python 3.11 or 3.12
+- Python 3.11 or 3.12 or 3.13
 - pip or uv package manager
 - At least one LLM API key (OpenAI, Anthropic, Google, etc.)
 
@@ -65,50 +65,35 @@ You can run the application either locally or using Docker. Both methods provide
 1. **Install Dependencies**:
 
    Windows (PowerShell):
-
    ```powershell
-   # Install uv if not already installed
-   pip install uv
+   # Install uv if needed
+   pip install --user uv
 
-   # Create and activate virtual environment
-   uv sync --frozen  # Creates .venv automatically
-   .\venv\Scripts\Activate.ps1
+   # Create venv and install all dependencies
+   uv venv -p 3.13
+   .\.venv\Scripts\Activate.ps1
+   uv pip install --upgrade pip
+   uv sync --all-extras --frozen
    ```
 
    macOS/Linux (bash):
-
    ```bash
-   # Install uv if not already installed
-   pip install uv
+   # Install uv if needed
+   pip install --user uv
 
-   # Create and activate virtual environment
-   uv sync --frozen  # Creates .venv automatically
+   # Create venv and install all dependencies
+   uv venv -p 3.13
    source .venv/bin/activate
+   uv pip install --upgrade pip
+   uv sync --all-extras --frozen
    ```
 
-2. **Configure Environment**:
-
-   Windows (PowerShell):
-
-   ```powershell
-   # Copy environment file
-   Copy-Item .env.example .env
-   
-   # Edit .env file with your settings:
-   # MODE=dev
-   # DEFAULT_MODEL=gpt-4o-mini
-   # HOST=0.0.0.0
-   # PORT=8000
-   # Add your LLM API key(s)
-   ```
-
-   macOS/Linux (bash):
-
+3. **Configure Environment**:
    ```bash
    # Copy environment file
    cp .env.example .env
    
-   # Edit .env file with your settings:
+   # Edit .env with your settings:
    # MODE=dev
    # DEFAULT_MODEL=gpt-4o-mini
    # HOST=0.0.0.0
@@ -116,57 +101,38 @@ You can run the application either locally or using Docker. Both methods provide
    # Add your LLM API key(s)
    ```
 
-3. **Run the Application**:
+4. **Run the Application**:
 
-   Windows (PowerShell) - Terminal 1:
-
-   ```powershell
-   # Start the backend service
+   Terminal 1 (Backend):
+   ```bash
    python src/run_service.py
    # Service will run on http://localhost:8000
    ```
 
-   Windows (PowerShell) - Terminal 2:
-
-   ```powershell
-   # Start the Streamlit frontend
-   $env:AGENT_URL="http://localhost:8000"
+   Terminal 2 (Frontend):
+   ```bash
+   export AGENT_URL="http://localhost:8000"  # For macOS/Linux
+   # or
+   $env:AGENT_URL="http://localhost:8000"    # For Windows PowerShell
+   
    streamlit run src/streamlit_app.py
    # UI will be available at http://localhost:8501
    ```
 
-   macOS/Linux (bash) - Terminal 1:
+## Troubleshooting
 
-   ```bash
-   # Start the backend service
-   python src/run_service.py
-   # Service will run on http://localhost:8000
-   ```
+### Port Conflicts
+Stop existing services:
+```bash
+# Linux/macOS
+kill $(lsof -t -i:8000) $(lsof -t -i:8501)
 
-   macOS/Linux (bash) - Terminal 2:
+# Windows PowerShell
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 8000,8501).OwningProcess -Force
+```
 
-   ```bash
-   # Start the Streamlit frontend
-   export AGENT_URL="http://localhost:8000"
-   streamlit run src/streamlit_app.py
-   # UI will be available at http://localhost:8501
-   ```
-
-### Docker Setup (Recommended for Production)
-
-1. **Configure Environment**:
-   - Copy `.env.example` to `.env`
-   - Configure the same environment variables as in local setup
-   - Docker will handle port mappings automatically
-
-2. **Run with Docker**:
-
-   ```sh
-   docker compose watch
-   ```
-
-   - Backend API: <http://localhost:8080/redoc>
-   - Streamlit UI: <http://localhost:8501>
+- Backend API: <http://localhost:8080/redoc>
+- Streamlit UI: <http://localhost:8501>
 
 ### Feature Parity
 
