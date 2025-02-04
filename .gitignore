@@ -174,3 +174,5 @@ cython_debug/
 .idea/
 .cursurrules
 .cursor/rules/orixa.mdc
+uv copy.lock
+.cursorrules

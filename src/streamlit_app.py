@@ -162,6 +162,8 @@ async def main() -> None:
         st.session_state.messages = []
     if "last_feedback" not in st.session_state:
         st.session_state.last_feedback = (None, None)
+    if "message_ids" not in st.session_state:
+        st.session_state.message_ids = set()
 
     # Initialize agent client
     if "agent_client" not in st.session_state:
@@ -286,9 +288,21 @@ async def draw_messages(messages_agen, is_new=False):
     try:
         container = st.empty()
         full_response = ""
+        current_message_id = None
         
         async for msg in messages_agen:
             try:
+                # Extract message ID from additional_kwargs if present
+                if isinstance(msg, ChatMessage):
+                    msg_id = msg.additional_kwargs.get("message_id")
+                else:
+                    msg_id = msg.get("additional_kwargs", {}).get("message_id")
+
+                # Skip if this is a duplicate message
+                if msg_id and msg_id in st.session_state.message_ids:
+                    logger.debug(f"Skipping duplicate message with ID: {msg_id}")
+                    continue
+                
                 # Handle both dict and ChatMessage types
                 msg_type = msg.type if isinstance(msg, ChatMessage) else msg.get("type")
                 msg_content = msg.content if isinstance(msg, ChatMessage) else msg.get("content")
@@ -329,6 +343,11 @@ async def draw_messages(messages_agen, is_new=False):
                     <div style='background: #f0f2f6; border-radius: 1rem; padding: 1rem; margin: 0.5rem 0;'>
                     {full_response}</div>
                     """, unsafe_allow_html=True)
+                    
+                    # Store message ID if this is a final message
+                    if msg_id and getattr(msg, "is_complete", False):
+                        st.session_state.message_ids.add(msg_id)
+                        logger.debug(f"Added complete message ID to tracking: {msg_id}")
 
                 # Allow other tasks to run
                 await asyncio.sleep(0)

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import START
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, AIMessage
 from langgraph.types import Command as BaseCommand
 
 from ...common.types import (
@@ -296,58 +296,118 @@ class AgentExecutorNode(GraphNode):
 
 class StreamingNode(GraphNode):
     """Node for handling streaming responses."""
+    def __init__(self, config: NodeConfig):
+        super().__init__(config)
+        self.active_streams: Dict[str, datetime] = {}
+        
     async def _execute(self, state: OrchestratorState) -> Dict[str, Any]:
-        """Handle streaming state."""
+        """Handle streaming state with enhanced buffer management."""
         logger.debug("StreamingNode executing with state: %s", state)
         
         if not state.streaming.is_streaming:
+            logger.info("Not in streaming mode, cleaning up state")
             # Clean up any remaining streaming state
-            updated_state = OrchestratorState(
-                **state.model_dump(),
-                streaming=StreamingState(is_streaming=False, current_buffer=None, buffers={})
-            )
-            logger.info("Cleaned up streaming state")
+            updated_state = state.model_copy(update={
+                "streaming": StreamingState(
+                    is_streaming=False,
+                    current_buffer=None,
+                    buffers={},
+                    flush_completed=False
+                )
+            })
             
             return {
                 "next": "router",
                 "state": updated_state
             }
             
-        buffer = state.streaming.current_buffer
-        if buffer and buffer.is_complete:
-            # Record streaming metrics
-            if self.config.enable_metrics:
-                metrics.add_stream_metrics(
-                    stream_time=self.node_metrics.execution_time if self.node_metrics else 0,
-                    token_count=len(buffer.content),
-                    success=not bool(buffer.error)
+        try:
+            # Get current buffer and message ID
+            current_buffer = state.streaming.current_buffer
+            if not current_buffer:
+                logger.warning("No current buffer in streaming state")
+                return {
+                    "next": "router",
+                    "state": state
+                }
+                
+            message_id = current_buffer.message_id
+            if not message_id:
+                message_id = str(uuid4())
+                current_buffer.message_id = message_id
+            
+            # Track stream activity
+            self.active_streams[message_id] = datetime.utcnow()
+            
+            # Check if we should flush the buffer
+            if state.streaming.should_flush() and not state.streaming.flush_completed:
+                logger.info(f"Processing flush for stream {message_id}")
+                
+                # Only flush if this is the stream owner
+                if message_id not in self.active_streams:
+                    logger.warning(f"Attempted flush for inactive stream {message_id}")
+                    return {
+                        "next": "executor",
+                        "state": state
+                    }
+                
+                # Get the final message
+                final_message = current_buffer.to_message()
+                
+                # Record streaming metrics
+                if self.config.enable_metrics:
+                    metrics.add_stream_metrics(
+                        stream_time=self.node_metrics.execution_time if self.node_metrics else 0,
+                        token_count=len(current_buffer.merged_content),
+                        success=True
+                    )
+                
+                # End the stream and update messages
+                updated_state = state.end_stream()
+                updated_state = updated_state.model_copy(
+                    update={"messages": updated_state.messages + [final_message]}
                 )
                 
-            # Create new state with ended stream
-            updated_state = state.end_stream()
+                # Create completion decision
+                completion_decision = {
+                    "next": "FINISH",
+                    "confidence": 1.0,
+                    "reasoning": "Streaming complete",
+                    "capabilities_matched": [],
+                    "fallback_agents": []
+                }
+                
+                # Update routing with completion decision
+                final_state = updated_state.update_routing(completion_decision)
+                
+                # Clean up stream tracking
+                del self.active_streams[message_id]
+                
+                logger.info(f"Stream {message_id} processing complete")
+                return {
+                    "next": "router",
+                    "state": final_state
+                }
             
-            # Create completion decision
-            completion_decision = {
-                "next": "FINISH",
-                "confidence": 1.0,
-                "reasoning": "Streaming complete",
-                "capabilities_matched": [],
-                "fallback_agents": []
-            }
-            
-            # Update routing with completion decision
-            final_state = updated_state.update_routing(completion_decision)
-            
+            # Continue streaming
+            logger.info(f"Continuing stream {message_id}")
             return {
-                "next": "router",
-                "state": final_state
+                "next": "executor",
+                "state": state
             }
             
-        logger.info("Continuing stream processing")
-        return {
-            "next": "executor",
-            "state": state
-        }
+        except Exception as e:
+            logger.error(f"Error in StreamingNode: {e}")
+            error_state = state.add_error(
+                str(e),
+                "StreamingError",
+                state.routing.current_agent,
+                {"phase": "streaming"}
+            )
+            return {
+                "next": "error_recovery",
+                "state": error_state
+            }
 
 class ErrorRecoveryNode(GraphNode):
     """Node for handling errors."""

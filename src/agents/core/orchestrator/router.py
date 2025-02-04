@@ -9,7 +9,7 @@ import logging
 from pydantic import BaseModel, Field, model_validator
 from langchain_core.runnables import RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langgraph.types import Command as BaseCommand
 from langchain_core.language_models import BaseLLM
 
@@ -115,9 +115,31 @@ class OrchestratorRouter:
             # If we're already streaming, continue with the current agent
             if state.streaming.is_streaming:
                 current_agent = state.routing.current_agent
+                logger.debug("Processing streaming state", extra={
+                    "current_agent": current_agent,
+                    "is_streaming": state.streaming.is_streaming,
+                    "has_buffer": state.streaming.current_buffer is not None,
+                    "flush_completed": state.streaming.flush_completed
+                })
+                
                 if current_agent:
-                    # Check if streaming should continue
-                    if state.streaming.current_buffer and state.streaming.current_buffer.is_complete:
+                    # Check if we should flush the buffer (and haven't already)
+                    if state.streaming.should_flush() and not state.streaming.flush_completed:
+                        logger.info("Stream buffer ready for flush")
+                        
+                        # Get the final message
+                        final_message = state.streaming.current_buffer.to_message()
+                        message_id = final_message.additional_kwargs.get("message_id")
+                        
+                        # Enhanced duplicate check - look at last two messages
+                        is_duplicate = False
+                        for msg in reversed(state.messages[-2:]):
+                            if (isinstance(msg, AIMessage) and 
+                                msg.additional_kwargs.get("message_id") == message_id):
+                                logger.info("Detected duplicate message, skipping update")
+                                is_duplicate = True
+                                break
+                        
                         decision = {
                             "next": "FINISH",
                             "confidence": 1.0,
@@ -125,7 +147,21 @@ class OrchestratorRouter:
                             "capabilities_matched": [],
                             "fallback_agents": []
                         }
+                        
+                        # Update state with the new message if not duplicate
+                        if not is_duplicate:
+                            logger.info(f"Adding new message with ID: {message_id}")
+                            state = state.model_copy(
+                                update={
+                                    "messages": state.messages + [final_message],
+                                    "streaming": {
+                                        **state.streaming.model_dump(),
+                                        "flush_completed": True
+                                    }
+                                }
+                            )
                     else:
+                        logger.info("Continuing stream with current agent")
                         decision = {
                             "next": current_agent,
                             "confidence": 1.0,
@@ -133,6 +169,7 @@ class OrchestratorRouter:
                             "capabilities_matched": [],
                             "fallback_agents": []
                         }
+                    
                     return BaseCommand(
                         goto=decision["next"],
                         update={

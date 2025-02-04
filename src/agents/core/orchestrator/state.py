@@ -2,10 +2,10 @@
 from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List, Literal, Annotated, Type, Union
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from pydantic import BaseModel, Field, model_validator, ConfigDict
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
 from ...common.types import (
     AgentError, AgentNotFoundError, AgentExecutionError,
     RouterError, MaxErrorsExceeded
@@ -14,6 +14,7 @@ from ...common.types import (
 # Constants
 MAX_ERRORS = 3
 CURRENT_VERSION = "2.0"
+STREAM_TIMEOUT = 5  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -77,32 +78,91 @@ class RoutingMetadata(BaseModel):
             "start_time": self.start_time
         }).to_dict()
 
-class StreamBuffer(BaseModel):
+class EnhancedStreamBuffer(BaseModel):
     """Manage streaming tokens."""
     tokens: List[str] = Field(default_factory=list)
+    merged_content: str = ""
+    message_id: Optional[str] = None
     is_complete: bool = False
     error: Optional[str] = None
+    last_chunk_time: Optional[datetime] = None
     
     def add_token(self, token: str) -> None:
-        """Add a token to the buffer."""
+        """Add a token to the buffer and update merged content."""
         self.tokens.append(token)
+        self.merged_content += token
+        self.last_chunk_time = datetime.utcnow()
         
     def get_content(self) -> str:
         """Get complete buffered content."""
-        return "".join(self.tokens)
+        return self.merged_content
+        
+    def has_timed_out(self, timeout_seconds: int = STREAM_TIMEOUT) -> bool:
+        """Check if the buffer has timed out."""
+        if not self.last_chunk_time:
+            return False
+        elapsed = (datetime.utcnow() - self.last_chunk_time).total_seconds()
+        return elapsed > timeout_seconds
         
     def clear(self) -> None:
         """Clear the buffer."""
         self.tokens = []
+        self.merged_content = ""
         self.is_complete = False
         self.error = None
+        self.last_chunk_time = None
+        
+    def mark_complete(self) -> None:
+        """Mark the buffer as complete."""
+        self.is_complete = True
+        
+    def to_message(self) -> AIMessage:
+        """Convert buffer content to an AIMessage."""
+        return AIMessage(
+            content=self.merged_content,
+            additional_kwargs={"message_id": self.message_id or str(uuid4())}
+        )
 
 class StreamingState(BaseModel):
     """Track streaming status across agents."""
     is_streaming: bool = False
-    current_buffer: Optional[StreamBuffer] = None
-    buffers: Dict[str, StreamBuffer] = Field(default_factory=dict)
-
+    current_buffer: Optional[EnhancedStreamBuffer] = None
+    buffers: Dict[str, EnhancedStreamBuffer] = Field(default_factory=dict)
+    flush_completed: bool = False
+    
+    def append_chunk(self, chunk: AIMessageChunk) -> None:
+        """Append a chunk to the current buffer."""
+        if not self.is_streaming:
+            raise ValueError("Cannot append chunk when not streaming")
+            
+        chunk_id = getattr(chunk, "id", None) or str(uuid4())
+            
+        if not self.current_buffer:
+            self.current_buffer = EnhancedStreamBuffer(message_id=chunk_id)
+        elif self.current_buffer.message_id != chunk_id:
+            logger.warning("Message ID mismatch in streaming, resetting buffer")
+            self.current_buffer = EnhancedStreamBuffer(message_id=chunk_id)
+            
+        # Extract content from chunk
+        content = getattr(chunk, "content", "")
+        if content:
+            self.current_buffer.add_token(content)
+            
+        # Check for finish condition
+        if hasattr(chunk, "response_metadata"):
+            finish_reason = chunk.response_metadata.get("finish_reason")
+            if finish_reason in ["stop", "tool_calls"]:
+                self.current_buffer.mark_complete()
+    
+    def should_flush(self, timeout_seconds: int = STREAM_TIMEOUT) -> bool:
+        """Check if the buffer should be flushed."""
+        if not self.current_buffer:
+            return False
+        return (
+            self.current_buffer.is_complete or 
+            self.current_buffer.has_timed_out(timeout_seconds)
+        )
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert instance to validated dictionary."""
         return self.model_dump()
@@ -115,13 +175,14 @@ class StreamingState(BaseModel):
     def start_stream(self, agent_id: str) -> None:
         """Start streaming for an agent."""
         self.is_streaming = True
-        self.current_buffer = StreamBuffer()
+        self.current_buffer = EnhancedStreamBuffer()
         self.buffers[agent_id] = self.current_buffer
         
     def end_stream(self) -> None:
         """End current stream."""
         if self.current_buffer:
             self.current_buffer.is_complete = True
+            self.flush_completed = True
         self.is_streaming = False
         self.current_buffer = None
 
@@ -290,8 +351,6 @@ class OrchestratorState(BaseModel):
     agent_ids: List[str] = Field(default_factory=list)
     next_agent: Optional[str] = None
     
-    # New attributes
-    
     @model_validator(mode="after")
     def validate_state(self) -> "OrchestratorState":
         """Validate state consistency."""
@@ -349,27 +408,6 @@ class OrchestratorState(BaseModel):
             
         logger.debug("State validation successful", extra=context)
         return self
-    
-    @classmethod
-    def create_validated_state(cls, data: Dict[str, Any]) -> "OrchestratorState":
-        """Create a new state instance with validated components."""
-        logger.debug("Creating validated state")
-        cls.debug_state(data, "Input to create_validated_state")
-        try:
-            # Ensure routing and streaming are proper dictionaries
-            if "routing" in data:
-                data["routing"] = cls.ensure_valid_dict(data["routing"], RoutingMetadata)
-            if "streaming" in data:
-                data["streaming"] = cls.ensure_valid_dict(data["streaming"], StreamingState)
-            cls.debug_state(data, "After converting nested fields")
-                
-            # Create and validate new state
-            new_state = cls.model_validate(data)
-            logger.debug(f"Created new state: {new_state}")
-            return new_state
-        except Exception as e:
-            logger.error(f"Error creating validated state: {e}")
-            raise ValueError(f"Failed to create valid state: {e}")
     
     def add_error(self, error: str, error_type: str, agent: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> "OrchestratorState":
         """Add error and return new state."""
