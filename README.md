@@ -1,4 +1,4 @@
-# Agentic Orixa
+# Agentic LangGragh
 
 An AI agent service built with LangGraph, FastAPI and Streamlit.
 
